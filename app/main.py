@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -21,6 +22,16 @@ from .service import SubtitleService
 
 def _moviepilot_error(message: str) -> MoviePilotEnvelope:
     return MoviePilotEnvelope(success=False, message=message, data=None)
+
+
+def _build_content_disposition(filename: str | None, *, fallback: str = "subtitle.srt") -> str:
+    raw_name = str(filename or "").strip() or fallback
+    # Keep an ASCII fallback to avoid header encoding errors.
+    ascii_name = "".join(ch if 32 <= ord(ch) < 127 and ch not in {'"', "\\"} else "_" for ch in raw_name)
+    if not ascii_name:
+        ascii_name = fallback
+    encoded_name = quote(raw_name, safe="")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}"
 
 
 def create_app(
@@ -70,7 +81,7 @@ def create_app(
         fetched = get_service(request).fetch_to_memory(token)
         media_type = "application/x-subrip" if fetched.subtitle_format == "srt" else "application/octet-stream"
         headers = {
-            "Content-Disposition": f'attachment; filename="{fetched.filename}"',
+            "Content-Disposition": _build_content_disposition(fetched.filename),
         }
         return StreamingResponse(io.BytesIO(fetched.content), media_type=media_type, headers=headers)
 
@@ -125,7 +136,7 @@ def create_app(
 
         media_type = "application/x-subrip" if fetched.subtitle_format == "srt" else "application/octet-stream"
         headers = {
-            "Content-Disposition": f'attachment; filename="{fetched.filename}"',
+            "Content-Disposition": _build_content_disposition(fetched.filename),
         }
         return StreamingResponse(io.BytesIO(fetched.content), media_type=media_type, headers=headers)
 
