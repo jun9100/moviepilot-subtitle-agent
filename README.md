@@ -1,26 +1,23 @@
 # MoviePilot Subtitle Agent
 
-A FastAPI subtitle search/download service with MoviePilot-compatible API mode.
+一个面向中文用户的字幕搜索/下载服务（FastAPI），并提供 MoviePilot 兼容接口。
 
-## Core Goal
+## 项目目标
 
-This service is designed for Chinese users who already have Plex/Infuse OpenSubtitles integration but still miss Chinese subtitles there.
+很多用户在 Plex/Infuse + OpenSubtitles 场景下，仍然会遇到“缺少中文字幕”。本服务的默认策略是：
 
-Default behavior:
+- 默认只关注中文字幕（`zh-cn` / `zh-tw`）。
+- 优先使用中文源（`assrt`，`subhd` 用于检索提示）。
+- OpenSubtitles 作为可选 fallback，而非默认主链路。
 
-- Focus on Chinese subtitles (`zh-cn`/`zh-tw`) only.
-- Prefer non-OpenSubtitles sources (`assrt` + `subhd` hints).
-- Keep OpenSubtitles providers as optional fallback instead of default path.
+## 主要功能
 
-## Features
+- 电影/剧集字幕搜索。
+- 字幕下载到磁盘。
+- 字幕流式下载（供插件直接写入目标目录）。
+- MoviePilot 兼容 API（可直接被插件调用）。
 
-- Chinese subtitle search and direct download pipeline (Assrt as primary downloadable source).
-- Uses SubHD as index hints to improve title/ID recall (especially when searching by IMDb/TMDB id).
-- Supports movie and TV episode subtitle search.
-- Supports subtitle download to disk and stream download.
-- Includes MoviePilot-compatible search/download endpoints.
-
-## Quick Start
+## 快速启动（本地）
 
 ```bash
 python -m venv .venv
@@ -30,13 +27,13 @@ cp .env.example .env
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8178
 ```
 
-Health check:
+健康检查：
 
 ```bash
 curl http://127.0.0.1:8178/health
 ```
 
-## Docker Quick Start
+## Docker 启动
 
 ```bash
 cp .env.example .env
@@ -45,56 +42,63 @@ curl http://127.0.0.1:8178/health
 docker compose logs -f subtitle-agent
 ```
 
-Stop:
+停止：
 
 ```bash
 docker compose down
 ```
 
-## HTTPS Compatibility (macOS)
+## 代理配置（重要）
 
-On macOS system Python builds that use LibreSSL (for example Python 3.9.6 + LibreSSL 2.8.3),
-`urllib3` v2 may show TLS compatibility warnings and can cause unstable HTTPS behavior in
-`requests`-based providers. This project pins `urllib3<2` on macOS in `requirements.txt` to
-keep subtitle provider HTTPS calls stable.
+如果你的 NAS 出网需要代理（例如访问 `assrt.net`），请在容器环境变量里至少配置：
 
-If you use Python linked to OpenSSL 1.1.1+ (Homebrew/python.org/pyenv builds), this warning
-does not apply.
+```yaml
+environment:
+  HTTP_PROXY: "http://<proxy-host>:999"
+  HTTPS_PROXY: "http://<proxy-host>:999"
+  http_proxy: "http://<proxy-host>:999"
+  https_proxy: "http://<proxy-host>:999"
+  NO_PROXY: "127.0.0.1,localhost,<subtitle-agent-host>,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
+```
 
-## Standard APIs
+说明：只有 `HTTP_PROXY` 不够，`https://` 请求需要 `HTTPS_PROXY`。
+
+## 标准 API
 
 - `POST /api/v1/subtitles/search`
 - `POST /api/v1/subtitles/download`
 - `GET /api/v1/subtitles/fetch/{token}`
 
-## MoviePilot Compatibility APIs
+## MoviePilot 兼容 API
 
 - `POST /api/v1/moviepilot/subtitles/search`
 - `GET /api/v1/moviepilot/subtitles/download/{token}`
 - `POST /api/v1/moviepilot/subtitles/download`
 
-Alias routes are also provided:
+兼容别名：
 
 - `/api/moviepilot/...`
 - `/moviepilot/...`
 
-## MoviePilot Plugin (SubtitleAgentBridge)
+## MoviePilot 插件示例
 
-Plugin example path:
+插件示例路径：
 
 `moviepilot-plugin-example/plugins.v2/subtitleagentbridge/__init__.py`
 
-Install steps:
+## 与插件配套时的关键建议
 
-1. Copy the `subtitleagentbridge` directory into your MoviePilot `plugins.v2` directory.
-2. Restart MoviePilot and enable `Subtitle Agent Bridge`.
-3. Configure:
-   - `host`: Subtitle Agent URL (for Dockerized MoviePilot, usually `http://host.docker.internal:8178`)
-   - `search_path`: `/api/v1/moviepilot/subtitles/search`
-   - `languages`: `zh-cn,zh-tw`
-4. Trigger a media transfer/import in MoviePilot. The plugin listens to `TransferComplete` and will auto search+download subtitles.
+为避免字幕写入未整理目录（如 `downloads`），请在插件里配置“只扫描刮削后目录”：
 
-## Tests
+- `include_paths`: 例如 `/media/tv,/media/movies`
+- `exclude_paths`: 例如 `/media/downloads,/media/整理前,/media/刷流`
+- `exclude_keywords`: 默认已包含 `downloads,download,整理前,刷流,strm,stream`
+
+## 更新记录（近期）
+
+- `v0.1.1`：修复中文文件名在下载响应头中导致的 500 错误（`Content-Disposition` 编码兼容）。
+
+## 测试
 
 ```bash
 pytest -q
