@@ -122,3 +122,15 @@ def test_ambiguous_archive_without_title_or_episode_is_rejected():
     )
 
     assert _provider()._candidate_matches_query(candidate, _query()) is False
+
+
+def test_search_ignores_assrt_errors_and_returns_empty(monkeypatch):
+    provider = _provider()
+
+    def fake_search_assrt(_keyword: str):
+        raise RuntimeError("ssl eof")
+
+    monkeypatch.setattr(provider, "_search_assrt", fake_search_assrt)
+
+    results = provider.search(_query(), providers=["assrt"])
+    assert results == []

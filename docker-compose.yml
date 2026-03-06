@@ -1,12 +1,12 @@
 services:
   subtitle-agent:
-    image: jun9100/moviepilot-subtitle-agent:v0.1.5
+    image: jun9100/moviepilot-subtitle-agent:v0.1.6
     container_name: moviepilot-subtitle-agent
     ports:
       - "8178:8178"
     environment:
       APP_NAME: "MoviePilot Subtitle Agent"
-      APP_VERSION: "0.1.5"
+      APP_VERSION: "0.1.6"
       HOST: "0.0.0.0"
       PORT: "8178"
       DEBUG: "false"

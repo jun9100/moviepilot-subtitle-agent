@@ -71,7 +71,12 @@ class ChineseSubtitleProvider:
 
         if "assrt" in normalized_providers:
             for keyword in keywords:
-                all_candidates.extend(self._search_assrt(keyword))
+                try:
+                    all_candidates.extend(self._search_assrt(keyword))
+                except Exception:
+                    # assrt network/SSL failures should not break the whole chain;
+                    # the service will continue with other sources/fallback providers.
+                    continue
 
         deduped = self._dedupe_candidates(all_candidates)
         filtered = [item for item in deduped if self._candidate_matches_query(item, query)]

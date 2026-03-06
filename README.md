@@ -98,6 +98,7 @@ environment:
 
 ## 更新记录（近期）
 
+- `v0.1.6`：修复 `assrt` 网络/SSL 异常导致整次搜索失败的问题，失败时自动继续后续源与 fallback。
 - `v0.1.5`：新增分层多源策略（`assrt/subhd` 后自动尝试 `podnapisi/tvsubtitles`，最后才用 OpenSubtitles）。
 - `v0.1.4`：保留 IMDb/TMDB ID 参与检索，同时继续使用更严格的剧集候选过滤规则。
 - `v0.1.3`：收紧剧集压缩包放宽规则，拒绝无集信息且标题不匹配的候选，进一步降低错剧/错集。
