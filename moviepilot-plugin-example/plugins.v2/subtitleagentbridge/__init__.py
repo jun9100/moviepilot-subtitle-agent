@@ -23,7 +23,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.4.0"
+    plugin_version = "0.5.0"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -38,7 +38,9 @@ class SubtitleAgentBridge(_PluginBase):
     _timeout: int = 60
     _overwrite: bool = False
     _notify: bool = True
-    _exclude_keywords: str = "整理前,刷流,strm,stream"
+    _include_paths: str = ""
+    _exclude_paths: str = ""
+    _exclude_keywords: str = "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
@@ -57,7 +59,11 @@ class SubtitleAgentBridge(_PluginBase):
         self._timeout = max(int(config.get("timeout") or 60), 60)
         self._overwrite = bool(config.get("overwrite"))
         self._notify = bool(config.get("notify", True))
-        self._exclude_keywords = str(config.get("exclude_keywords") or "整理前,刷流,strm,stream")
+        self._include_paths = str(config.get("include_paths") or "")
+        self._exclude_paths = str(config.get("exclude_paths") or "")
+        self._exclude_keywords = str(
+            config.get("exclude_keywords") or "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
+        )
 
     def get_state(self) -> bool:
         return self._enabled
@@ -80,7 +86,7 @@ class SubtitleAgentBridge(_PluginBase):
                 "endpoint": self.backfill_directory,
                 "methods": ["GET"],
                 "summary": "补齐目录字幕",
-                "description": "扫描目录中缺失字幕的视频文件并批量下载字幕。支持按文件名关键词过滤，并排除整理前/刷流目录。",
+                "description": "扫描目录中缺失字幕的视频文件并批量下载字幕。支持仅扫描刮削后目录，并排除整理前/刷流目录。",
             },
         ]
 
@@ -132,6 +138,39 @@ class SubtitleAgentBridge(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "include_paths",
+                                            "label": "仅扫描目录(刮削后)",
+                                            "placeholder": "/media/library/tv,/media/library/movie",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "exclude_paths",
+                                            "label": "回填排除目录",
+                                            "placeholder": "/media/downloads,/media/整理前,/media/刷流",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [
                                     {
@@ -139,7 +178,7 @@ class SubtitleAgentBridge(_PluginBase):
                                         "props": {
                                             "model": "exclude_keywords",
                                             "label": "回填排除关键词",
-                                            "placeholder": "整理前,刷流,strm,stream",
+                                            "placeholder": "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache",
                                         },
                                     }
                                 ],
@@ -238,7 +277,7 @@ class SubtitleAgentBridge(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "插件监听 transfer.complete 事件。媒体入库后，会调用 Subtitle Agent 的 MoviePilot 兼容接口并将字幕写入同目录。",
+                                            "text": "插件监听 transfer.complete 事件。建议配置“仅扫描目录”为刮削后媒体库路径，避免字幕写入下载/未整理目录。",
                                         },
                                     }
                                 ],
@@ -256,7 +295,9 @@ class SubtitleAgentBridge(_PluginBase):
             "timeout": 60,
             "overwrite": False,
             "notify": True,
-            "exclude_keywords": "整理前,刷流,strm,stream",
+            "include_paths": "",
+            "exclude_paths": "",
+            "exclude_keywords": "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache",
         }
 
     def get_page(self) -> List[dict]:
@@ -323,9 +364,19 @@ class SubtitleAgentBridge(_PluginBase):
         total = 0
         success = 0
         errors = []
+        include_paths = self.__merge_csv_values(self._include_paths)
+        excluded_paths = self.__merge_csv_values(self._exclude_paths)
+        excluded_keywords = self.__merge_csv_values(self._exclude_keywords)
 
         for media_file in file_list:
             if not self.__is_video_file(media_file):
+                continue
+            media_path = Path(media_file)
+            if not self.__is_included_path(media_path, include_paths):
+                logger.info(f"[SubtitleAgentBridge] 跳过非库目录文件: {media_file}")
+                continue
+            if self.__is_excluded_path(media_path, excluded_paths, excluded_keywords):
+                logger.info(f"[SubtitleAgentBridge] 跳过排除目录文件: {media_file}")
                 continue
             total += 1
             state, message = self.__download_for_media_file(
@@ -442,6 +493,7 @@ class SubtitleAgentBridge(_PluginBase):
         media_type: str = "",
         languages: str = "",
         name_contains: str = "",
+        include_paths: str = "",
         exclude_paths: str = "",
         exclude_keywords: str = "",
         overwrite: bool = False,
@@ -460,12 +512,6 @@ class SubtitleAgentBridge(_PluginBase):
         if not directory:
             return schemas.Response(success=False, message="directory 参数不能为空")
 
-        scan_root = Path(directory).expanduser()
-        if not scan_root.exists():
-            return schemas.Response(success=False, message=f"目录不存在: {scan_root}")
-        if not scan_root.is_dir():
-            return schemas.Response(success=False, message=f"不是目录: {scan_root}")
-
         recursive_flag = self.__to_bool(recursive, default=True)
         overwrite_flag = self.__to_bool(overwrite, default=self._overwrite)
         desired_type = self.__normalize_media_type(media_type)
@@ -480,8 +526,12 @@ class SubtitleAgentBridge(_PluginBase):
             max_file_count = 200
         name_keyword = str(name_contains or "").strip()
         name_filter = name_keyword.lower()
-        excluded_paths = self.__split_csv(exclude_paths)
-        excluded_keywords = self.__split_csv(exclude_keywords or self._exclude_keywords)
+        included_paths = self.__merge_csv_values(self._include_paths, include_paths)
+        excluded_paths = self.__merge_csv_values(self._exclude_paths, exclude_paths)
+        excluded_keywords = self.__merge_csv_values(self._exclude_keywords, exclude_keywords)
+        scan_roots = self.__collect_scan_roots(directory=directory, include_paths=included_paths)
+        if not scan_roots:
+            return schemas.Response(success=False, message="没有可扫描目录，请检查 directory/include_paths 配置")
 
         processed = 0
         success = 0
@@ -492,100 +542,111 @@ class SubtitleAgentBridge(_PluginBase):
         downloaded: List[Dict[str, Any]] = []
 
         matched = 0
+        seen_identities = set()
         try:
-            file_iter = self.__iter_video_files(scan_root, recursive=recursive_flag)
-            for video_file in file_iter:
-                if self.__is_excluded_path(
-                    media_file=video_file,
-                    excluded_paths=excluded_paths,
-                    excluded_keywords=excluded_keywords,
-                ):
-                    excluded += 1
-                    continue
+            for scan_root in scan_roots:
+                file_iter = self.__iter_video_files(scan_root, recursive=recursive_flag)
+                for video_file in file_iter:
+                    identity = self.__file_identity(video_file)
+                    if identity and identity in seen_identities:
+                        continue
+                    if identity:
+                        seen_identities.add(identity)
 
-                if name_filter and name_filter not in video_file.name.lower():
-                    continue
+                    if self.__is_excluded_path(
+                        media_file=video_file,
+                        excluded_paths=excluded_paths,
+                        excluded_keywords=excluded_keywords,
+                    ):
+                        excluded += 1
+                        continue
 
-                matched += 1
-                if matched > max_file_count:
-                    break
+                    if name_filter and name_filter not in video_file.name.lower():
+                        continue
 
-                processed += 1
-
-                if not overwrite_flag and self.__has_subtitle(video_file):
-                    skipped += 1
-                    continue
-
-                parsed = self.__parse_media_context_from_file(video_file, forced_media_type=desired_type)
-                if not parsed.get("title"):
-                    failed += 1
-                    errors.append(f"{video_file.name}: 无法从文件名解析标题")
-                    continue
-
-                payload = {
-                    "title": parsed.get("title"),
-                    "type": parsed.get("type"),
-                    "year": parsed.get("year"),
-                    "season": parsed.get("season"),
-                    "episode": parsed.get("episode"),
-                    "language": selected_languages,
-                    "limit": effective_limit,
-                }
-
-                selected_title = payload.get("title")
-                items = []
-                message = None
-                for title_candidate in self.__build_title_candidates(
-                    parsed_title=parsed.get("title"),
-                    media_file=video_file,
-                    name_keyword=name_keyword,
-                ):
-                    payload["title"] = title_candidate
-                    items, message = self.__search_items(payload)
-                    if items:
-                        selected_title = title_candidate
+                    matched += 1
+                    if matched > max_file_count:
                         break
 
-                if not items:
-                    failed += 1
-                    errors.append(
-                        f"{video_file.name}: {self.__normalize_failure_message(message, '未找到字幕')}"
-                    )
-                    continue
+                    processed += 1
 
-                selected = self.__pick_item(items, preferred_languages=preferred_languages)
-                content, subtitle_format, message = self.__download_item(selected)
-                if not content:
-                    failed += 1
-                    errors.append(
-                        f"{video_file.name}: {self.__normalize_failure_message(message, '下载字幕失败')}"
-                    )
-                    continue
+                    if not overwrite_flag and self.__has_subtitle(video_file):
+                        skipped += 1
+                        continue
 
-                subtitle_path = Path(self.__build_subtitle_path(str(video_file), subtitle_format))
-                if subtitle_path.exists() and not overwrite_flag:
-                    skipped += 1
-                    continue
+                    parsed = self.__parse_media_context_from_file(video_file, forced_media_type=desired_type)
+                    if not parsed.get("title"):
+                        failed += 1
+                        errors.append(f"{video_file.name}: 无法从文件名解析标题")
+                        continue
 
-                try:
-                    subtitle_path.parent.mkdir(parents=True, exist_ok=True)
-                    subtitle_path.write_bytes(content)
-                except Exception as err:
-                    failed += 1
-                    errors.append(f"{video_file.name}: 写入字幕失败: {str(err)}")
-                    continue
-
-                success += 1
-                downloaded.append(
-                    {
-                        "video": str(video_file),
-                        "subtitle": str(subtitle_path),
-                        "title": selected_title,
-                        "provider": selected.get("provider"),
-                        "language": selected.get("language"),
+                    payload = {
+                        "title": parsed.get("title"),
+                        "type": parsed.get("type"),
+                        "year": parsed.get("year"),
+                        "season": parsed.get("season"),
+                        "episode": parsed.get("episode"),
+                        "language": selected_languages,
+                        "limit": effective_limit,
                     }
-                )
-                logger.info(f"[SubtitleAgentBridge] 批量补字幕成功: {subtitle_path}")
+
+                    selected_title = payload.get("title")
+                    items = []
+                    message = None
+                    for title_candidate in self.__build_title_candidates(
+                        parsed_title=parsed.get("title"),
+                        media_file=video_file,
+                        name_keyword=name_keyword,
+                    ):
+                        payload["title"] = title_candidate
+                        items, message = self.__search_items(payload)
+                        if items:
+                            selected_title = title_candidate
+                            break
+
+                    if not items:
+                        failed += 1
+                        errors.append(
+                            f"{video_file.name}: {self.__normalize_failure_message(message, '未找到字幕')}"
+                        )
+                        continue
+
+                    selected = self.__pick_item(items, preferred_languages=preferred_languages)
+                    content, subtitle_format, message = self.__download_item(selected)
+                    if not content:
+                        failed += 1
+                        errors.append(
+                            f"{video_file.name}: {self.__normalize_failure_message(message, '下载字幕失败')}"
+                        )
+                        continue
+
+                    subtitle_path = Path(self.__build_subtitle_path(str(video_file), subtitle_format))
+                    if subtitle_path.exists() and not overwrite_flag:
+                        skipped += 1
+                        continue
+
+                    try:
+                        subtitle_path.parent.mkdir(parents=True, exist_ok=True)
+                        subtitle_path.write_bytes(content)
+                    except Exception as err:
+                        failed += 1
+                        errors.append(f"{video_file.name}: 写入字幕失败: {str(err)}")
+                        continue
+
+                    success += 1
+                    downloaded.append(
+                        {
+                            "video": str(video_file),
+                            "subtitle": str(subtitle_path),
+                            "title": selected_title,
+                            "provider": selected.get("provider"),
+                            "language": selected.get("language"),
+                        }
+                    )
+                    logger.info(f"[SubtitleAgentBridge] 批量补字幕成功: {subtitle_path}")
+
+                if matched > max_file_count:
+                    break
         except Exception as err:
             return schemas.Response(success=False, message=f"扫描目录失败: {str(err)}")
 
@@ -623,10 +684,12 @@ class SubtitleAgentBridge(_PluginBase):
             success=failed == 0,
             message=message,
             data={
-                "directory": str(scan_root),
+                "directory": directory,
+                "scan_roots": [str(path) for path in scan_roots],
                 "recursive": recursive_flag,
                 "overwrite": overwrite_flag,
                 "name_contains": name_filter,
+                "include_paths": included_paths,
                 "exclude_paths": excluded_paths,
                 "exclude_keywords": excluded_keywords,
                 "languages": selected_languages,
@@ -817,7 +880,8 @@ class SubtitleAgentBridge(_PluginBase):
         candidates: List[str] = []
         seen = set()
 
-        for raw_title in [parsed_title, name_keyword, media_file.parent.name, media_file.stem]:
+        keyword = name_keyword if self.__should_use_name_keyword(name_keyword) else ""
+        for raw_title in [parsed_title, keyword, media_file.parent.name, media_file.stem]:
             normalized = self.__clean_title_text(str(raw_title or ""))
             if not normalized:
                 continue
@@ -828,6 +892,14 @@ class SubtitleAgentBridge(_PluginBase):
             candidates.append(normalized)
 
         return candidates
+
+    @staticmethod
+    def __should_use_name_keyword(value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        compact = re.sub(r"\s+", "", text)
+        return len(compact) >= 3
 
     def __clean_title_text(self, title: str) -> str:
         value = str(title or "")
@@ -890,8 +962,56 @@ class SubtitleAgentBridge(_PluginBase):
         return [item.strip() for item in str(value or "").split(",") if item and item.strip()]
 
     @staticmethod
+    def __merge_csv_values(*values: Any) -> List[str]:
+        merged: List[str] = []
+        seen = set()
+        for value in values:
+            for item in SubtitleAgentBridge.__split_csv(value):
+                key = item.strip().lower()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item.strip())
+        return merged
+
+    def __collect_scan_roots(self, directory: str, include_paths: List[str]) -> List[Path]:
+        candidates = include_paths if include_paths else [directory]
+        roots: List[Path] = []
+        seen = set()
+        for item in candidates:
+            path = Path(str(item)).expanduser()
+            if not path.exists() or not path.is_dir():
+                continue
+            key = self.__normalize_path(str(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(path)
+        return roots
+
+    @staticmethod
     def __split_languages(languages: str) -> List[str]:
         return SubtitleAgentBridge.__split_csv(languages)
+
+    @staticmethod
+    def __file_identity(path: Path) -> str:
+        try:
+            stat = path.stat()
+            return f"{stat.st_dev}:{stat.st_ino}"
+        except Exception:
+            return ""
+
+    def __is_included_path(self, media_file: Path, include_paths: List[str]) -> bool:
+        if not include_paths:
+            return True
+        normalized_file = self.__normalize_path(str(media_file))
+        for raw_path in include_paths:
+            path_prefix = self.__normalize_path(raw_path)
+            if not path_prefix:
+                continue
+            if normalized_file == path_prefix or normalized_file.startswith(f"{path_prefix}/"):
+                return True
+        return False
 
     def __is_excluded_path(self, media_file: Path, excluded_paths: List[str], excluded_keywords: List[str]) -> bool:
         normalized_file = self.__normalize_path(str(media_file))
@@ -903,7 +1023,8 @@ class SubtitleAgentBridge(_PluginBase):
                 return True
 
         for keyword in excluded_keywords:
-            if keyword and keyword.lower() in normalized_file:
+            key = str(keyword or "").strip().lower()
+            if key and key in normalized_file:
                 return True
         return False
 
