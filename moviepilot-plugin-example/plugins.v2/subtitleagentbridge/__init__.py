@@ -23,7 +23,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.0"
+    plugin_version = "0.5.1"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -41,6 +41,7 @@ class SubtitleAgentBridge(_PluginBase):
     _include_paths: str = ""
     _exclude_paths: str = ""
     _exclude_keywords: str = "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
+    _title_aliases: str = ""
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
@@ -64,6 +65,7 @@ class SubtitleAgentBridge(_PluginBase):
         self._exclude_keywords = str(
             config.get("exclude_keywords") or "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
         )
+        self._title_aliases = str(config.get("title_aliases") or "")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -160,6 +162,25 @@ class SubtitleAgentBridge(_PluginBase):
                                             "model": "exclude_paths",
                                             "label": "回填排除目录",
                                             "placeholder": "/media/downloads,/media/整理前,/media/刷流",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "title_aliases",
+                                            "label": "标题别名映射",
+                                            "placeholder": "短剧开始啦=コントが始まる; 黄石：法警小队=Marshals",
                                         },
                                     }
                                 ],
@@ -298,6 +319,7 @@ class SubtitleAgentBridge(_PluginBase):
             "include_paths": "",
             "exclude_paths": "",
             "exclude_keywords": "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache",
+            "title_aliases": "",
         }
 
     def get_page(self) -> List[dict]:
@@ -496,6 +518,7 @@ class SubtitleAgentBridge(_PluginBase):
         include_paths: str = "",
         exclude_paths: str = "",
         exclude_keywords: str = "",
+        title_aliases: str = "",
         overwrite: bool = False,
         max_files: int = 200,
         limit: int = 0,
@@ -529,6 +552,7 @@ class SubtitleAgentBridge(_PluginBase):
         included_paths = self.__merge_csv_values(self._include_paths, include_paths)
         excluded_paths = self.__merge_csv_values(self._exclude_paths, exclude_paths)
         excluded_keywords = self.__merge_csv_values(self._exclude_keywords, exclude_keywords)
+        alias_map = self.__merge_title_aliases(self._title_aliases, title_aliases)
         scan_roots = self.__collect_scan_roots(directory=directory, include_paths=included_paths)
         if not scan_roots:
             return schemas.Response(success=False, message="没有可扫描目录，请检查 directory/include_paths 配置")
@@ -597,6 +621,7 @@ class SubtitleAgentBridge(_PluginBase):
                         parsed_title=parsed.get("title"),
                         media_file=video_file,
                         name_keyword=name_keyword,
+                        alias_map=alias_map,
                     ):
                         payload["title"] = title_candidate
                         items, message = self.__search_items(payload)
@@ -876,14 +901,25 @@ class SubtitleAgentBridge(_PluginBase):
                 return True
         return False
 
-    def __build_title_candidates(self, parsed_title: Any, media_file: Path, name_keyword: str = "") -> List[str]:
+    def __build_title_candidates(
+        self,
+        parsed_title: Any,
+        media_file: Path,
+        name_keyword: str = "",
+        alias_map: Optional[Dict[str, List[str]]] = None,
+    ) -> List[str]:
         candidates: List[str] = []
         seen = set()
 
         keyword = name_keyword if self.__should_use_name_keyword(name_keyword) else ""
-        for raw_title in [parsed_title, keyword, media_file.parent.name, media_file.stem]:
+        alias_titles = self.__lookup_alias_titles(parsed_title=parsed_title, media_file=media_file, alias_map=alias_map or {})
+        series_title = self.__extract_series_title(media_file)
+
+        for raw_title in [parsed_title, *alias_titles, series_title, keyword, media_file.stem]:
             normalized = self.__clean_title_text(str(raw_title or ""))
             if not normalized:
+                continue
+            if self.__is_generic_title(normalized):
                 continue
             key = normalized.lower()
             if key in seen:
@@ -905,6 +941,9 @@ class SubtitleAgentBridge(_PluginBase):
         value = str(title or "")
         value = re.sub(r"[\[\(\{][^\]\)\}]*[\]\)\}]", " ", value)
         value = self._season_episode_pattern.sub(" ", value)
+        value = re.sub(r"(?i)\bS\d{1,2}\b", " ", value)
+        value = re.sub(r"(?i)\bseason\s*\d+\b", " ", value)
+        value = re.sub(r"第\s*\d+\s*[季集话]", " ", value)
         value = self._year_pattern.sub(" ", value)
         value = re.sub(
             r"(?i)\b(2160p|1080p|720p|480p|x264|x265|h264|h265|hevc|hdr|dv|bluray|bdrip|web[-_. ]?dl|webrip|hdrip|dvdrip|aac|dts|atmos|remux|repack|proper|extended|paramount\+?|netflix|amzn|hmax|hbo|max|disney\+?|atvp)\b",
@@ -916,6 +955,31 @@ class SubtitleAgentBridge(_PluginBase):
         value = re.sub(r"[._]+", " ", value)
         value = re.sub(r"\s+", " ", value).strip(" -._")
         return value
+
+    @staticmethod
+    def __is_generic_title(value: str) -> bool:
+        text = str(value or "").strip().lower()
+        if not text:
+            return True
+        if re.fullmatch(r"season\s*\d+", text):
+            return True
+        if re.fullmatch(r"s\d{1,2}", text):
+            return True
+        if re.fullmatch(r"第\s*\d+\s*[季集话]", text):
+            return True
+        if text in {"movie", "tv", "series"}:
+            return True
+        return False
+
+    def __extract_series_title(self, media_file: Path) -> str:
+        for parent in media_file.parents[:3]:
+            title = self.__clean_title_text(parent.name)
+            if not title:
+                continue
+            if self.__is_generic_title(title):
+                continue
+            return title
+        return ""
 
     def __parse_media_context_from_file(self, media_file: Path, forced_media_type: str = "") -> Dict[str, Any]:
         raw_name = media_file.stem
@@ -973,6 +1037,57 @@ class SubtitleAgentBridge(_PluginBase):
                 seen.add(key)
                 merged.append(item.strip())
         return merged
+
+    def __merge_title_aliases(self, *values: Any) -> Dict[str, List[str]]:
+        alias_map: Dict[str, List[str]] = {}
+        for value in values:
+            if not value:
+                continue
+            chunks = re.split(r"[;\n]+", str(value))
+            for chunk in chunks:
+                pair = str(chunk or "").strip()
+                if not pair:
+                    continue
+                key, sep, raw_values = pair.partition("=")
+                if not sep:
+                    key, sep, raw_values = pair.partition(":")
+                if not sep:
+                    continue
+                source = self.__clean_title_text(key)
+                if not source:
+                    continue
+                aliases = [
+                    self.__clean_title_text(item)
+                    for item in re.split(r"[|,]+", raw_values)
+                    if self.__clean_title_text(item)
+                ]
+                if not aliases:
+                    continue
+                alias_map[source.lower()] = aliases
+        return alias_map
+
+    def __lookup_alias_titles(self, parsed_title: Any, media_file: Path, alias_map: Dict[str, List[str]]) -> List[str]:
+        if not alias_map:
+            return []
+
+        keys = []
+        parsed = self.__clean_title_text(parsed_title)
+        series = self.__extract_series_title(media_file)
+        if parsed:
+            keys.append(parsed.lower())
+        if series:
+            keys.append(series.lower())
+
+        aliases: List[str] = []
+        seen = set()
+        for key in keys:
+            for item in alias_map.get(key, []):
+                lowered = item.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                aliases.append(item)
+        return aliases
 
     def __collect_scan_roots(self, directory: str, include_paths: List[str]) -> List[Path]:
         candidates = include_paths if include_paths else [directory]
