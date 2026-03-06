@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.1.0"
+    app_version: str = "0.1.2"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
@@ -28,7 +28,6 @@ class Settings(BaseSettings):
     token_ttl_seconds: int = 1800
     request_timeout_seconds: int = 20
     user_agent: str = "MoviePilotSubtitleAgent/0.2"
-
     subtitle_output_dir: Path = Path("data/subtitles")
 
     addic7ed_username: str | None = None

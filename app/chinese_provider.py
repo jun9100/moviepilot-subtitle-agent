@@ -324,12 +324,35 @@ class ChineseSubtitleProvider:
 
         if query.media_type == "tv":
             season_episode = self._extract_season_episode(merged)
-            if season_episode:
-                season, episode = season_episode
-                if query.season and season != query.season:
-                    return False
-                if query.episode and episode != query.episode:
-                    return False
+            season_only = self._extract_season(merged)
+            if query.season and season_only and season_only != query.season:
+                return False
+
+            if query.season and query.episode:
+                if season_episode:
+                    season, episode = season_episode
+                    if season != query.season or episode != query.episode:
+                        return False
+                else:
+                    episode = self._extract_episode_from_text(merged)
+                    episode_range = self._extract_episode_range(merged)
+                    episode_upper_bound = self._extract_episode_upper_bound(merged)
+
+                    if episode is not None and episode != query.episode:
+                        return False
+                    if episode_range and not (episode_range[0] <= query.episode <= episode_range[1]):
+                        return False
+                    if episode_upper_bound is not None and query.episode > episode_upper_bound:
+                        return False
+
+                    if (
+                        episode is None
+                        and not episode_range
+                        and episode_upper_bound is None
+                        and not self._looks_like_season_pack(candidate, query=query)
+                    ):
+                        # Episodic requests should avoid ambiguous single-file subtitles.
+                        return False
 
         if query.year:
             year_match = re.search(r"\b(19\d{2}|20\d{2})\b", merged)
@@ -344,6 +367,109 @@ class ChineseSubtitleProvider:
         if not match:
             return None
         return int(match.group(1)), int(match.group(2))
+
+    @staticmethod
+    def _extract_season(text: str) -> int | None:
+        season_episode = ChineseSubtitleProvider._extract_season_episode(text)
+        if season_episode:
+            return season_episode[0]
+
+        match = re.search(r"\bS(\d{1,2})(?!E)\b", text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+
+        match = re.search(r"\bSeason\s*(\d{1,2})\b", text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+
+        match = re.search(r"第\s*(\d{1,2})\s*季", text)
+        if match:
+            return int(match.group(1))
+        return None
+
+    @staticmethod
+    def _extract_episode_from_text(text: str) -> int | None:
+        if ChineseSubtitleProvider._extract_episode_range(text):
+            return None
+        if ChineseSubtitleProvider._extract_episode_upper_bound(text) is not None:
+            return None
+
+        season_episode = ChineseSubtitleProvider._extract_season_episode(text)
+        if season_episode:
+            return season_episode[1]
+
+        match = re.search(r"\bE(?:P)?\s*0?(\d{1,3})\b", text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+
+        match = re.search(r"第\s*0?(\d{1,3})\s*[集话]", text)
+        if match:
+            return int(match.group(1))
+        return None
+
+    @staticmethod
+    def _extract_episode_range(text: str) -> tuple[int, int] | None:
+        patterns = (
+            r"(?i)\bE(?:P)?\s*0?(\d{1,3})\s*[-~至到]\s*E?(?:P)?\s*0?(\d{1,3})\b",
+            r"第\s*0?(\d{1,3})\s*[-~至到]\s*0?(\d{1,3})\s*[集话]",
+            r"(?i)\b(?:ep|e)?\s*0?(\d{1,3})\s*[-~]\s*0?(\d{1,3})\b",
+        )
+
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            start = int(match.group(1))
+            end = int(match.group(2))
+            if start > end:
+                start, end = end, start
+            return start, end
+
+        return None
+
+    @staticmethod
+    def _extract_episode_upper_bound(text: str) -> int | None:
+        patterns = (
+            r"(?i)更新\s*[至到]\s*(?:第)?\s*(?:E(?:P)?)?\s*0?(\d{1,3})\s*(?:[集话])?",
+            r"(?i)\bup\s*to\s*e?\s*0?(\d{1,3})\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return int(match.group(1))
+        return None
+
+    @staticmethod
+    def _looks_like_season_pack(candidate: DirectSubtitleCandidate, *, query: SearchRequest) -> bool:
+        merged = f"{candidate.title} {candidate.release_name}"
+        season = ChineseSubtitleProvider._extract_season(merged)
+        if query.season and season and season != query.season:
+            return False
+
+        ext = Path(urlparse(candidate.download_url).path).suffix.lower()
+        if ext not in {".zip", ".rar"}:
+            return False
+
+        episode = ChineseSubtitleProvider._extract_episode_from_text(merged)
+        if episode is not None and query.episode and episode == query.episode:
+            return True
+
+        episode_range = ChineseSubtitleProvider._extract_episode_range(merged)
+        if episode_range and query.episode and episode_range[0] <= query.episode <= episode_range[1]:
+            return True
+
+        upper_bound = ChineseSubtitleProvider._extract_episode_upper_bound(merged)
+        if upper_bound is not None and query.episode and query.episode <= upper_bound:
+            return True
+
+        if re.search(
+            r"(?i)\b(complete|全集|合集|全季|全\d+集|season\s*\d+\s*complete|s\d{1,2}\s*complete)\b",
+            merged,
+        ):
+            return True
+
+        # Some in-progress archives do not expose episode numbers in title text.
+        return True
 
     @staticmethod
     def _normalize_language_list(languages: list[str]) -> set[str]:
@@ -414,6 +540,31 @@ class ChineseSubtitleProvider:
             season, episode = season_episode
             if query.season and query.episode and season == query.season and episode == query.episode:
                 score += 80
+            elif query.season and season == query.season:
+                score += 20
+        elif query.media_type == "tv" and query.season and query.episode:
+            episode = self._extract_episode_from_text(merged)
+            episode_range = self._extract_episode_range(merged)
+            episode_upper_bound = self._extract_episode_upper_bound(merged)
+            if episode is not None:
+                if episode == query.episode:
+                    score += 55
+                else:
+                    score -= 120
+            elif episode_range:
+                if episode_range[0] <= query.episode <= episode_range[1]:
+                    score += 45
+                else:
+                    score -= 130
+            elif episode_upper_bound is not None:
+                if query.episode <= episode_upper_bound:
+                    score += 28
+                else:
+                    score -= 120
+            elif self._looks_like_season_pack(candidate, query=query):
+                score += 15
+            else:
+                score -= 50
 
         if "官方" in candidate.release_name:
             score += 6
@@ -460,7 +611,7 @@ class ChineseSubtitleProvider:
             except Exception as exc:
                 raise SubtitleDownloadError(f"failed to extract zip archive: {exc}") from exc
 
-            selected_file = self._pick_extracted_subtitle(extract_dir, query.languages)
+            selected_file = self._pick_extracted_subtitle(extract_dir, query)
             if not selected_file:
                 raise SubtitleDownloadError("zip archive does not contain subtitle files")
 
@@ -490,7 +641,7 @@ class ChineseSubtitleProvider:
             if proc.returncode != 0:
                 raise SubtitleDownloadError(f"failed to extract rar archive: {proc.stderr.strip() or proc.stdout.strip()}")
 
-            selected_file = self._pick_extracted_subtitle(extract_dir, query.languages)
+            selected_file = self._pick_extracted_subtitle(extract_dir, query)
             if not selected_file:
                 raise SubtitleDownloadError("rar archive does not contain subtitle files")
 
@@ -504,7 +655,7 @@ class ChineseSubtitleProvider:
                 filename=selected_file.name or fallback_filename,
             )
 
-    def _pick_extracted_subtitle(self, root: Path, requested_languages: list[str]) -> Path | None:
+    def _pick_extracted_subtitle(self, root: Path, query: SearchRequest) -> Path | None:
         files = [
             path
             for path in root.rglob("*")
@@ -513,9 +664,15 @@ class ChineseSubtitleProvider:
         if not files:
             return None
 
-        requested = self._normalize_language_list(requested_languages)
+        requested = self._normalize_language_list(query.languages)
         wants_simplified = any(item in requested for item in {"zh", "zh-cn", "zh-hans", "chs", "chi", "zho"})
         wants_traditional = any(item in requested for item in {"zh", "zh-tw", "zh-hant", "cht", "chi", "zho"})
+        wants_episode = query.media_type == "tv" and query.season and query.episode
+        title_tokens = [
+            token.lower()
+            for token in re.findall(r"[\w\u4e00-\u9fff]+", query.title or "")
+            if len(token) >= 2
+        ]
 
         def file_score(path: Path) -> int:
             name = path.name.lower()
@@ -534,6 +691,47 @@ class ChineseSubtitleProvider:
                 score -= 20
             if "bilingual" in name or "双语" in name:
                 score += 8
+
+            if wants_episode:
+                season_episode = self._extract_season_episode(name)
+                season_only = self._extract_season(name)
+                episode_only = self._extract_episode_from_text(name)
+                episode_range = self._extract_episode_range(name)
+                episode_upper_bound = self._extract_episode_upper_bound(name)
+
+                if season_episode:
+                    if season_episode[0] == query.season and season_episode[1] == query.episode:
+                        score += 220
+                    elif season_episode[0] == query.season:
+                        score -= 120
+                    else:
+                        score -= 180
+                else:
+                    if season_only and season_only != query.season:
+                        score -= 120
+                    if episode_only is not None:
+                        if episode_only == query.episode:
+                            score += 180
+                        else:
+                            score -= 140
+                    elif episode_range:
+                        if episode_range[0] <= query.episode <= episode_range[1]:
+                            score += 130
+                        else:
+                            score -= 140
+                    elif episode_upper_bound is not None:
+                        if query.episode <= episode_upper_bound:
+                            score += 80
+                        else:
+                            score -= 120
+                    elif re.search(r"(?i)\b(complete|全集|全\d+集)\b", name):
+                        score += 25
+                    else:
+                        score -= 20
+
+            if title_tokens:
+                hit_count = sum(1 for token in title_tokens if token in name)
+                score += hit_count * 8
 
             return score
 
