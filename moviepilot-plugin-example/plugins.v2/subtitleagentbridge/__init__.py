@@ -23,7 +23,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -78,7 +78,7 @@ class SubtitleAgentBridge(_PluginBase):
                 "endpoint": self.backfill_directory,
                 "methods": ["GET"],
                 "summary": "补齐目录字幕",
-                "description": "扫描目录中缺失字幕的视频文件并批量下载字幕。",
+                "description": "扫描目录中缺失字幕的视频文件并批量下载字幕。支持按文件名关键词过滤。",
             },
         ]
 
@@ -415,6 +415,7 @@ class SubtitleAgentBridge(_PluginBase):
         recursive: bool = True,
         media_type: str = "",
         languages: str = "",
+        name_contains: str = "",
         overwrite: bool = False,
         max_files: int = 200,
         limit: int = 0,
@@ -449,6 +450,7 @@ class SubtitleAgentBridge(_PluginBase):
         max_file_count = self.__to_int(max_files) or 200
         if max_file_count <= 0:
             max_file_count = 200
+        name_filter = str(name_contains or "").strip().lower()
 
         processed = 0
         success = 0
@@ -460,6 +462,9 @@ class SubtitleAgentBridge(_PluginBase):
         try:
             file_iter = self.__iter_video_files(scan_root, recursive=recursive_flag, max_files=max_file_count)
             for video_file in file_iter:
+                if name_filter and name_filter not in video_file.name.lower():
+                    continue
+
                 processed += 1
 
                 if not overwrite_flag and self.__has_subtitle(video_file):
@@ -522,6 +527,8 @@ class SubtitleAgentBridge(_PluginBase):
             return schemas.Response(success=False, message=f"扫描目录失败: {str(err)}")
 
         if processed == 0:
+            if name_filter:
+                return schemas.Response(success=False, message=f"目录中未找到匹配关键词的视频文件: {name_filter}")
             return schemas.Response(success=False, message="目录中未找到视频文件")
 
         result = {
@@ -552,6 +559,7 @@ class SubtitleAgentBridge(_PluginBase):
                 "directory": str(scan_root),
                 "recursive": recursive_flag,
                 "overwrite": overwrite_flag,
+                "name_contains": name_filter,
                 "languages": selected_languages,
                 "total": processed,
                 "success": success,
