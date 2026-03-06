@@ -134,6 +134,10 @@ class ChineseSubtitleProvider:
         seeds: list[str] = []
         if query.title.strip():
             seeds.append(query.title.strip())
+        if query.imdb_id:
+            seeds.append(query.imdb_id)
+        if query.tmdb_id:
+            seeds.append(str(query.tmdb_id))
 
         keywords = list(dict.fromkeys(seed for seed in seeds if seed))
         if not use_subhd:
