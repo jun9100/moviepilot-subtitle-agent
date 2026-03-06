@@ -1,11 +1,41 @@
 services:
   subtitle-agent:
-    build: .
+    image: jun9100/moviepilot-subtitle-agent:v0.1.5
     container_name: moviepilot-subtitle-agent
     ports:
       - "8178:8178"
-    env_file:
-      - .env
+    environment:
+      APP_NAME: "MoviePilot Subtitle Agent"
+      APP_VERSION: "0.1.5"
+      HOST: "0.0.0.0"
+      PORT: "8178"
+      DEBUG: "false"
+
+      DEFAULT_LANGUAGES: "zh-cn,zh-tw"
+      DEFAULT_PROVIDERS: "assrt,subhd"
+      ENABLE_SUBLIMINAL_FALLBACK: "true"
+      SUBLIMINAL_FALLBACK_PROVIDERS: "podnapisi,tvsubtitles,opensubtitlescom,opensubtitles"
+      MAX_RESULTS: "30"
+      TOKEN_TTL_SECONDS: "1800"
+      REQUEST_TIMEOUT_SECONDS: "20"
+      SUBTITLE_OUTPUT_DIR: "data/subtitles"
+      USER_AGENT: "MoviePilotSubtitleAgent/0.2"
+
+      HTTP_PROXY: "http://<proxy-host>:999"
+      HTTPS_PROXY: "http://<proxy-host>:999"
+      http_proxy: "http://<proxy-host>:999"
+      https_proxy: "http://<proxy-host>:999"
+      NO_PROXY: "127.0.0.1,localhost,<subtitle-agent-host>,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
+      no_proxy: "127.0.0.1,localhost,<subtitle-agent-host>,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
+
+      # Optional provider credentials
+      ADDIC7ED_USERNAME: ""
+      ADDIC7ED_PASSWORD: ""
+      OPENSUBTITLES_USERNAME: ""
+      OPENSUBTITLES_PASSWORD: ""
+      OPENSUBTITLESCOM_USERNAME: ""
+      OPENSUBTITLESCOM_PASSWORD: ""
+      OPENSUBTITLESCOM_API_KEY: ""
     volumes:
       - ./data:/app/data
     restart: unless-stopped

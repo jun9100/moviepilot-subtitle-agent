@@ -15,15 +15,18 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.1.4"
+    app_version: str = "0.1.5"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
 
     default_languages: str = "zh-cn,zh-tw"
     default_providers: str = "assrt,subhd"
-    enable_subliminal_fallback: bool = False
-    subliminal_fallback_providers: str = "opensubtitlescom,podnapisi,tvsubtitles,opensubtitles"
+    enable_subliminal_fallback: bool = True
+    # Fallback source chain:
+    # 1) non-opensubtitles providers
+    # 2) opensubtitles providers (last resort)
+    subliminal_fallback_providers: str = "podnapisi,tvsubtitles,opensubtitlescom,opensubtitles"
     max_results: int = 30
     token_ttl_seconds: int = 1800
     request_timeout_seconds: int = 20
@@ -56,6 +59,16 @@ class Settings(BaseSettings):
     @property
     def subliminal_provider_list(self) -> list[str]:
         return [item.strip() for item in self.subliminal_fallback_providers.split(",") if item.strip()]
+
+    @property
+    def non_opensubtitles_fallback_provider_list(self) -> list[str]:
+        opensubtitles_names = {"opensubtitles", "opensubtitlesvip", "opensubtitlescom", "opensubtitlescomvip"}
+        return [item for item in self.subliminal_provider_list if item.lower() not in opensubtitles_names]
+
+    @property
+    def opensubtitles_fallback_provider_list(self) -> list[str]:
+        opensubtitles_names = {"opensubtitles", "opensubtitlesvip", "opensubtitlescom", "opensubtitlescomvip"}
+        return [item for item in self.subliminal_provider_list if item.lower() in opensubtitles_names]
 
     @property
     def language_list(self) -> list[str]:

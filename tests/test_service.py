@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.config import Settings
 from app.errors import SubtitleDownloadError, SubtitleNotFoundError
-from app.models import SearchRequest
+from app.models import SearchRequest, SubtitleSearchItem
 from app.service import SubtitleService
 
 from .fakes import FakeChineseProvider, make_candidate
@@ -158,3 +159,95 @@ def test_expired_token_raises_not_found(tmp_path):
 
     with pytest.raises(SubtitleNotFoundError):
         service.fetch_to_memory(token)
+
+
+def test_search_fallback_chain_tries_secondary_then_opensubtitles(tmp_path):
+    provider = FakeChineseProvider([])
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="assrt,subhd",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            enable_subliminal_fallback=True,
+            subliminal_fallback_providers="podnapisi,tvsubtitles,opensubtitlescom,opensubtitles",
+        ),
+        chinese_provider=provider,
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_search_with_subliminal(self, *, query, providers):
+        calls.append(list(providers))
+        return []
+
+    service._search_with_subliminal_providers = types.MethodType(fake_search_with_subliminal, service)
+
+    result = service.search(
+        SearchRequest(
+            title="短剧开始啦",
+            media_type="tv",
+            season=1,
+            episode=3,
+            languages=["zh-cn", "zh-tw"],
+            limit=5,
+        )
+    )
+
+    assert result.total == 0
+    assert calls == [
+        ["podnapisi", "tvsubtitles"],
+        ["opensubtitlescom", "opensubtitles"],
+    ]
+
+
+def test_search_stops_before_opensubtitles_when_secondary_has_results(tmp_path):
+    provider = FakeChineseProvider([])
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="assrt,subhd",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            enable_subliminal_fallback=True,
+            subliminal_fallback_providers="podnapisi,tvsubtitles,opensubtitlescom,opensubtitles",
+        ),
+        chinese_provider=provider,
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_search_with_subliminal(self, *, query, providers):
+        calls.append(list(providers))
+        if providers == ["podnapisi", "tvsubtitles"]:
+            return [
+                SubtitleSearchItem(
+                    token="t-secondary",
+                    provider="podnapisi",
+                    subtitle_id="secondary-1",
+                    title=query.title,
+                    language="zh",
+                    score=66,
+                    matches=[],
+                    hearing_impaired=None,
+                    page_link=None,
+                    subtitle_format="srt",
+                    download_url="/api/v1/subtitles/fetch/t-secondary",
+                )
+            ]
+        return []
+
+    service._search_with_subliminal_providers = types.MethodType(fake_search_with_subliminal, service)
+
+    result = service.search(
+        SearchRequest(
+            title="短剧开始啦",
+            media_type="tv",
+            season=1,
+            episode=3,
+            languages=["zh-cn", "zh-tw"],
+            limit=5,
+        )
+    )
+
+    assert result.total == 1
+    assert result.items[0].provider == "podnapisi"
+    assert calls == [["podnapisi", "tvsubtitles"]]

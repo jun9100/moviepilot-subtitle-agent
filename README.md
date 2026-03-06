@@ -8,7 +8,8 @@
 
 - 默认只关注中文字幕（`zh-cn` / `zh-tw`）。
 - 优先使用中文源（`assrt`，`subhd` 用于检索提示）。
-- OpenSubtitles 作为可选 fallback，而非默认主链路。
+- 多源分层检索：`assrt/subhd` → `podnapisi/tvsubtitles` → `opensubtitles`。
+- OpenSubtitles 仅作为最后兜底。
 
 ## 主要功能
 
@@ -97,6 +98,7 @@ environment:
 
 ## 更新记录（近期）
 
+- `v0.1.5`：新增分层多源策略（`assrt/subhd` 后自动尝试 `podnapisi/tvsubtitles`，最后才用 OpenSubtitles）。
 - `v0.1.4`：保留 IMDb/TMDB ID 参与检索，同时继续使用更严格的剧集候选过滤规则。
 - `v0.1.3`：收紧剧集压缩包放宽规则，拒绝无集信息且标题不匹配的候选，进一步降低错剧/错集。
 - `v0.1.2`：增强剧集字幕匹配与压缩包内目标集选择，降低错集字幕概率。

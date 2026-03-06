@@ -65,6 +65,7 @@ def create_app(
             "name": settings_state.app_name,
             "version": settings_state.app_version,
             "providers": settings_state.provider_list,
+            "fallback_providers": settings_state.subliminal_provider_list,
             "default_languages": settings_state.language_list,
         }
 

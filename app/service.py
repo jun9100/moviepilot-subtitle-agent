@@ -93,7 +93,24 @@ class SubtitleService:
             )
 
         if not results and self._settings.enable_subliminal_fallback:
-            results.extend(self._search_with_subliminal_fallback(query))
+            non_opensubtitles_providers = self._settings.non_opensubtitles_fallback_provider_list
+            if non_opensubtitles_providers:
+                results.extend(
+                    self._search_with_subliminal_providers(
+                        query=query,
+                        providers=non_opensubtitles_providers,
+                    )
+                )
+
+        if not results and self._settings.enable_subliminal_fallback:
+            opensubtitles_providers = self._settings.opensubtitles_fallback_provider_list
+            if opensubtitles_providers:
+                results.extend(
+                    self._search_with_subliminal_providers(
+                        query=query,
+                        providers=opensubtitles_providers,
+                    )
+                )
 
         results.sort(key=lambda item: item.score, reverse=True)
         limit = min(query.limit, self._settings.max_results)
@@ -249,7 +266,12 @@ class SubtitleService:
             content=content,
         )
 
-    def _search_with_subliminal_fallback(self, query: SearchRequest) -> list[SubtitleSearchItem]:
+    def _search_with_subliminal_providers(
+        self,
+        *,
+        query: SearchRequest,
+        providers: list[str],
+    ) -> list[SubtitleSearchItem]:
         languages = parse_languages(query.languages)
         video = self._build_video(query)
 
@@ -257,11 +279,12 @@ class SubtitleService:
             subtitle_map = self._backend.list_subtitles(
                 {video},
                 languages,
-                providers=self._settings.subliminal_provider_list,
+                providers=providers,
                 provider_configs=self._settings.provider_configs,
             )
         except Exception as exc:
-            raise SubtitleSearchError(f"subliminal fallback search failed: {exc}") from exc
+            joined = ",".join(providers)
+            raise SubtitleSearchError(f"subliminal provider search failed ({joined}): {exc}") from exc
 
         subtitles = subtitle_map.get(video, [])
         results: list[SubtitleSearchItem] = []
