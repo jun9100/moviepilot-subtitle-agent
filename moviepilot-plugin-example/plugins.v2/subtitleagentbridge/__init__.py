@@ -1,7 +1,10 @@
+import json
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 
 from app import schemas
 from app.core.config import settings
@@ -10,7 +13,6 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 from app.schemas.types import EventType, MediaType
-from app.utils.http import RequestUtils
 
 
 class SubtitleAgentBridge(_PluginBase):
@@ -21,9 +23,9 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.3.0"
     plugin_author = "jun9100"
-    author_url = "https://github.com/jun9100/moviepilot-subtitle-agent"
+    author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
     plugin_order = 50
     auth_level = 1
@@ -33,9 +35,13 @@ class SubtitleAgentBridge(_PluginBase):
     _search_path: str = "/api/v1/moviepilot/subtitles/search"
     _languages: str = "zh-cn,zh-tw"
     _limit: int = 5
-    _timeout: int = 20
+    _timeout: int = 60
     _overwrite: bool = False
     _notify: bool = True
+
+    _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
+    _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
+    _year_pattern = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
     def init_plugin(self, config: dict = None):
         if not config:
@@ -46,7 +52,8 @@ class SubtitleAgentBridge(_PluginBase):
         self._search_path = str(config.get("search_path") or "/api/v1/moviepilot/subtitles/search")
         self._languages = str(config.get("languages") or "zh-cn,zh-tw")
         self._limit = int(config.get("limit") or 5)
-        self._timeout = int(config.get("timeout") or 20)
+        # Some providers may respond slowly in NAS environments; keep a safe minimum timeout.
+        self._timeout = max(int(config.get("timeout") or 60), 60)
         self._overwrite = bool(config.get("overwrite"))
         self._notify = bool(config.get("notify", True))
 
@@ -65,7 +72,14 @@ class SubtitleAgentBridge(_PluginBase):
                 "methods": ["GET"],
                 "summary": "手动下载字幕",
                 "description": "按标题信息调用 Subtitle Agent 搜索并下载字幕。",
-            }
+            },
+            {
+                "path": "/backfill_directory",
+                "endpoint": self.backfill_directory,
+                "methods": ["GET"],
+                "summary": "补齐目录字幕",
+                "description": "扫描目录中缺失字幕的视频文件并批量下载字幕。",
+            },
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -218,7 +232,7 @@ class SubtitleAgentBridge(_PluginBase):
             "search_path": "/api/v1/moviepilot/subtitles/search",
             "languages": "zh-cn,zh-tw",
             "limit": 5,
-            "timeout": 20,
+            "timeout": 60,
             "overwrite": False,
             "notify": True,
         }
@@ -230,6 +244,7 @@ class SubtitleAgentBridge(_PluginBase):
             f"最近执行时间: {last_result.get('time') or '-'}",
             f"处理文件数: {last_result.get('total') or 0}",
             f"成功数: {last_result.get('success') or 0}",
+            f"跳过数: {last_result.get('skipped') or 0}",
             f"失败数: {last_result.get('failed') or 0}",
         ]
         errors = last_result.get("errors") or []
@@ -355,7 +370,10 @@ class SubtitleAgentBridge(_PluginBase):
         if not items:
             return schemas.Response(success=False, message=message or "未找到可用字幕")
 
-        selected = self.__pick_item(items)
+        selected = self.__pick_item(
+            items,
+            preferred_languages=self.__split_languages(languages or self._languages),
+        )
         content, subtitle_format, message = self.__download_item(selected)
         if not content:
             return schemas.Response(success=False, message=message or "下载字幕失败")
@@ -387,6 +405,160 @@ class SubtitleAgentBridge(_PluginBase):
                 "provider": selected.get("provider"),
                 "subtitle_id": selected.get("subtitle_id"),
                 "size": len(content),
+            },
+        )
+
+    def backfill_directory(
+        self,
+        apikey: str,
+        directory: str,
+        recursive: bool = True,
+        media_type: str = "",
+        languages: str = "",
+        overwrite: bool = False,
+        max_files: int = 200,
+        limit: int = 0,
+    ) -> schemas.Response:
+        """
+        扫描目录里没有字幕的视频文件并批量下载字幕。
+        API:
+        /api/v1/plugin/SubtitleAgentBridge/backfill_directory
+        """
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+        if not self._host:
+            return schemas.Response(success=False, message="未配置 Subtitle Agent 地址")
+        if not directory:
+            return schemas.Response(success=False, message="directory 参数不能为空")
+
+        scan_root = Path(directory).expanduser()
+        if not scan_root.exists():
+            return schemas.Response(success=False, message=f"目录不存在: {scan_root}")
+        if not scan_root.is_dir():
+            return schemas.Response(success=False, message=f"不是目录: {scan_root}")
+
+        recursive_flag = self.__to_bool(recursive, default=True)
+        overwrite_flag = self.__to_bool(overwrite, default=self._overwrite)
+        desired_type = self.__normalize_media_type(media_type)
+        preferred_languages = self.__split_languages(languages or self._languages)
+        selected_languages = ",".join(preferred_languages) if preferred_languages else self._languages
+        effective_limit = self.__to_int(limit) or self._limit
+        if effective_limit <= 0:
+            effective_limit = self._limit
+
+        max_file_count = self.__to_int(max_files) or 200
+        if max_file_count <= 0:
+            max_file_count = 200
+
+        processed = 0
+        success = 0
+        skipped = 0
+        failed = 0
+        errors: List[str] = []
+        downloaded: List[Dict[str, Any]] = []
+
+        try:
+            file_iter = self.__iter_video_files(scan_root, recursive=recursive_flag, max_files=max_file_count)
+            for video_file in file_iter:
+                processed += 1
+
+                if not overwrite_flag and self.__has_subtitle(video_file):
+                    skipped += 1
+                    continue
+
+                parsed = self.__parse_media_context_from_file(video_file, forced_media_type=desired_type)
+                if not parsed.get("title"):
+                    failed += 1
+                    errors.append(f"{video_file.name}: 无法从文件名解析标题")
+                    continue
+
+                payload = {
+                    "title": parsed.get("title"),
+                    "type": parsed.get("type"),
+                    "year": parsed.get("year"),
+                    "season": parsed.get("season"),
+                    "episode": parsed.get("episode"),
+                    "language": selected_languages,
+                    "limit": effective_limit,
+                }
+
+                items, message = self.__search_items(payload)
+                if not items:
+                    failed += 1
+                    errors.append(f"{video_file.name}: {message or '未找到字幕'}")
+                    continue
+
+                selected = self.__pick_item(items, preferred_languages=preferred_languages)
+                content, subtitle_format, message = self.__download_item(selected)
+                if not content:
+                    failed += 1
+                    errors.append(f"{video_file.name}: {message or '下载字幕失败'}")
+                    continue
+
+                subtitle_path = Path(self.__build_subtitle_path(str(video_file), subtitle_format))
+                if subtitle_path.exists() and not overwrite_flag:
+                    skipped += 1
+                    continue
+
+                try:
+                    subtitle_path.parent.mkdir(parents=True, exist_ok=True)
+                    subtitle_path.write_bytes(content)
+                except Exception as err:
+                    failed += 1
+                    errors.append(f"{video_file.name}: 写入字幕失败: {str(err)}")
+                    continue
+
+                success += 1
+                downloaded.append(
+                    {
+                        "video": str(video_file),
+                        "subtitle": str(subtitle_path),
+                        "provider": selected.get("provider"),
+                        "language": selected.get("language"),
+                    }
+                )
+                logger.info(f"[SubtitleAgentBridge] 批量补字幕成功: {subtitle_path}")
+        except Exception as err:
+            return schemas.Response(success=False, message=f"扫描目录失败: {str(err)}")
+
+        if processed == 0:
+            return schemas.Response(success=False, message="目录中未找到视频文件")
+
+        result = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total": processed,
+            "success": success,
+            "skipped": skipped,
+            "failed": failed,
+            "errors": errors,
+        }
+        self.save_data("last_result", result)
+
+        if self._notify:
+            text = f"补字幕完成，共扫描 {processed} 个视频，成功 {success} 个，跳过 {skipped} 个，失败 {failed} 个"
+            if errors:
+                text = f"{text}\n" + "\n".join(errors[:5])
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title="Subtitle Agent 补字幕结果",
+                text=text,
+            )
+
+        message = f"扫描 {processed} 个视频，成功 {success}，跳过 {skipped}，失败 {failed}"
+        return schemas.Response(
+            success=failed == 0,
+            message=message,
+            data={
+                "directory": str(scan_root),
+                "recursive": recursive_flag,
+                "overwrite": overwrite_flag,
+                "languages": selected_languages,
+                "total": processed,
+                "success": success,
+                "skipped": skipped,
+                "failed": failed,
+                "items": downloaded[:50],
+                "errors": errors[:50],
             },
         )
 
@@ -440,19 +612,29 @@ class SubtitleAgentBridge(_PluginBase):
 
     def __search_items(self, payload: Dict[str, Any]) -> Tuple[List[dict], Optional[str]]:
         search_url = self.__compose_url(self._search_path)
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = Request(
+            url=search_url,
+            data=body_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
 
         try:
-            res = RequestUtils(timeout=self._timeout).post(search_url, json=payload)
+            with urlopen(request, timeout=self._timeout) as res:
+                status_code = int(getattr(res, "status", 200))
+                content = res.read()
         except Exception as err:
             return [], f"请求搜索接口失败: {str(err)}"
 
-        if not res:
-            return [], "搜索接口无响应"
-        if res.status_code != 200:
-            return [], f"搜索接口返回错误: {res.status_code}"
+        if status_code != 200:
+            return [], f"搜索接口返回错误: {status_code}"
 
         try:
-            body = res.json()
+            body = json.loads(content.decode("utf-8", errors="ignore"))
         except Exception as err:
             return [], f"解析搜索结果失败: {str(err)}"
 
@@ -467,8 +649,8 @@ class SubtitleAgentBridge(_PluginBase):
         items = body.get("items") if isinstance(body, dict) else []
         return items if isinstance(items, list) else [], None
 
-    def __pick_item(self, items: List[dict]) -> dict:
-        preferred_langs = self.__split_languages(self._languages)
+    def __pick_item(self, items: List[dict], preferred_languages: Optional[List[str]] = None) -> dict:
+        preferred_langs = preferred_languages or self.__split_languages(self._languages)
         for lang in preferred_langs:
             for item in items:
                 if str(item.get("language") or "").lower().startswith(lang.lower()):
@@ -482,23 +664,29 @@ class SubtitleAgentBridge(_PluginBase):
 
         full_url = self.__compose_url(download_url)
         try:
-            res = RequestUtils(timeout=self._timeout).get_res(full_url)
+            request = Request(
+                url=full_url,
+                headers={"Accept": "*/*"},
+                method="GET",
+            )
+            with urlopen(request, timeout=self._timeout) as res:
+                status_code = int(getattr(res, "status", 200))
+                content_type = str(res.headers.get("Content-Type") or "").lower()
+                content = res.read()
         except Exception as err:
             return None, "srt", f"请求下载接口失败: {str(err)}"
 
-        if not res:
-            return None, "srt", "下载接口无响应"
-        if res.status_code != 200:
-            return None, "srt", f"下载接口返回错误: {res.status_code}"
+        if status_code != 200:
+            return None, "srt", f"下载接口返回错误: {status_code}"
 
-        try:
-            body = res.json()
-        except Exception:
-            body = None
-        if isinstance(body, dict) and "success" in body and body.get("success") is not True:
-            return None, "srt", str(body.get("message") or "字幕下载失败")
+        if "application/json" in content_type:
+            try:
+                body = json.loads(content.decode("utf-8", errors="ignore"))
+            except Exception:
+                body = None
+            if isinstance(body, dict) and "success" in body and body.get("success") is not True:
+                return None, "srt", str(body.get("message") or "字幕下载失败")
 
-        content = res.content
         if not content:
             return None, "srt", "下载内容为空"
 
@@ -521,6 +709,75 @@ class SubtitleAgentBridge(_PluginBase):
             ".webm",
         }
 
+    def __iter_video_files(self, root: Path, recursive: bool, max_files: int) -> Iterator[Path]:
+        file_count = 0
+        iterator = root.rglob("*") if recursive else root.iterdir()
+        for path in iterator:
+            if not path.is_file():
+                continue
+            if not self.__is_video_file(str(path)):
+                continue
+            yield path
+            file_count += 1
+            if file_count >= max_files:
+                break
+
+    def __has_subtitle(self, media_file: Path) -> bool:
+        prefix = media_file.stem
+        subtitle_prefix = f"{prefix}."
+        for candidate in media_file.parent.iterdir():
+            if not candidate.is_file():
+                continue
+            suffix = candidate.suffix.lower()
+            if suffix not in self._subtitle_suffixes:
+                continue
+            name = candidate.name
+            if name == f"{prefix}{suffix}" or name.startswith(subtitle_prefix):
+                return True
+        return False
+
+    def __parse_media_context_from_file(self, media_file: Path, forced_media_type: str = "") -> Dict[str, Any]:
+        raw_name = media_file.stem
+        cleaned = re.sub(r"[\[\(\{][^\]\)\}]*[\]\)\}]", " ", raw_name)
+
+        season = None
+        episode = None
+        season_episode_match = self._season_episode_pattern.search(cleaned)
+        if season_episode_match:
+            season = self.__to_int(season_episode_match.group(1))
+            episode = self.__to_int(season_episode_match.group(2))
+
+        media_kind = self.__normalize_media_type(forced_media_type)
+        if not media_kind:
+            media_kind = "series" if season and episode else "movie"
+
+        year = None
+        year_match = self._year_pattern.search(raw_name) or self._year_pattern.search(cleaned)
+        if year_match:
+            year = self.__to_int(year_match.group(1))
+
+        normalized_title = cleaned
+        normalized_title = self._season_episode_pattern.sub(" ", normalized_title)
+        normalized_title = self._year_pattern.sub(" ", normalized_title)
+        normalized_title = re.sub(
+            r"(?i)\b(2160p|1080p|720p|480p|x264|x265|h264|h265|hevc|hdr|dv|bluray|bdrip|web[-_. ]?dl|webrip|hdrip|dvdrip|aac|dts|atmos|remux|repack|proper|extended)\b",
+            " ",
+            normalized_title,
+        )
+        normalized_title = re.sub(r"[._]+", " ", normalized_title)
+        normalized_title = re.sub(r"\s+", " ", normalized_title).strip(" -._")
+
+        if not normalized_title:
+            normalized_title = media_file.parent.name
+
+        return {
+            "title": normalized_title,
+            "type": media_kind,
+            "year": year,
+            "season": season if media_kind == "series" else None,
+            "episode": episode if media_kind == "series" else None,
+        }
+
     @staticmethod
     def __build_subtitle_path(media_file: str, subtitle_format: str) -> str:
         fmt = (subtitle_format or "srt").strip().lower()
@@ -540,6 +797,28 @@ class SubtitleAgentBridge(_PluginBase):
             return int(value)
         except Exception:
             return None
+
+    @staticmethod
+    def __to_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on", "y"}:
+            return True
+        if text in {"0", "false", "no", "off", "n"}:
+            return False
+        return default
+
+    @staticmethod
+    def __normalize_media_type(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if text in {"series", "tv", "show", "episode"}:
+            return "series"
+        if text in {"movie", "film"}:
+            return "movie"
+        return ""
 
     @staticmethod
     def __normalize_host(host: Any) -> str:
