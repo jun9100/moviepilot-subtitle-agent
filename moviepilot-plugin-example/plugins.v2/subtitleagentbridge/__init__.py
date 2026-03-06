@@ -23,7 +23,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.3.2"
+    plugin_version = "0.4.0"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -38,6 +38,7 @@ class SubtitleAgentBridge(_PluginBase):
     _timeout: int = 60
     _overwrite: bool = False
     _notify: bool = True
+    _exclude_keywords: str = "整理前,刷流,strm,stream"
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
@@ -56,6 +57,7 @@ class SubtitleAgentBridge(_PluginBase):
         self._timeout = max(int(config.get("timeout") or 60), 60)
         self._overwrite = bool(config.get("overwrite"))
         self._notify = bool(config.get("notify", True))
+        self._exclude_keywords = str(config.get("exclude_keywords") or "整理前,刷流,strm,stream")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -78,7 +80,7 @@ class SubtitleAgentBridge(_PluginBase):
                 "endpoint": self.backfill_directory,
                 "methods": ["GET"],
                 "summary": "补齐目录字幕",
-                "description": "扫描目录中缺失字幕的视频文件并批量下载字幕。支持按文件名关键词过滤。",
+                "description": "扫描目录中缺失字幕的视频文件并批量下载字幕。支持按文件名关键词过滤，并排除整理前/刷流目录。",
             },
         ]
 
@@ -123,6 +125,25 @@ class SubtitleAgentBridge(_PluginBase):
                                     }
                                 ],
                             },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "exclude_keywords",
+                                            "label": "回填排除关键词",
+                                            "placeholder": "整理前,刷流,strm,stream",
+                                        },
+                                    }
+                                ],
+                            }
                         ],
                     },
                     {
@@ -235,6 +256,7 @@ class SubtitleAgentBridge(_PluginBase):
             "timeout": 60,
             "overwrite": False,
             "notify": True,
+            "exclude_keywords": "整理前,刷流,strm,stream",
         }
 
     def get_page(self) -> List[dict]:
@@ -245,6 +267,7 @@ class SubtitleAgentBridge(_PluginBase):
             f"处理文件数: {last_result.get('total') or 0}",
             f"成功数: {last_result.get('success') or 0}",
             f"跳过数: {last_result.get('skipped') or 0}",
+            f"排除数: {last_result.get('excluded') or 0}",
             f"失败数: {last_result.get('failed') or 0}",
         ]
         errors = last_result.get("errors") or []
@@ -368,7 +391,10 @@ class SubtitleAgentBridge(_PluginBase):
 
         items, message = self.__search_items(payload)
         if not items:
-            return schemas.Response(success=False, message=message or "未找到可用字幕")
+            return schemas.Response(
+                success=False,
+                message=self.__normalize_failure_message(message, "未找到可用字幕"),
+            )
 
         selected = self.__pick_item(
             items,
@@ -416,6 +442,8 @@ class SubtitleAgentBridge(_PluginBase):
         media_type: str = "",
         languages: str = "",
         name_contains: str = "",
+        exclude_paths: str = "",
+        exclude_keywords: str = "",
         overwrite: bool = False,
         max_files: int = 200,
         limit: int = 0,
@@ -450,11 +478,15 @@ class SubtitleAgentBridge(_PluginBase):
         max_file_count = self.__to_int(max_files) or 200
         if max_file_count <= 0:
             max_file_count = 200
-        name_filter = str(name_contains or "").strip().lower()
+        name_keyword = str(name_contains or "").strip()
+        name_filter = name_keyword.lower()
+        excluded_paths = self.__split_csv(exclude_paths)
+        excluded_keywords = self.__split_csv(exclude_keywords or self._exclude_keywords)
 
         processed = 0
         success = 0
         skipped = 0
+        excluded = 0
         failed = 0
         errors: List[str] = []
         downloaded: List[Dict[str, Any]] = []
@@ -463,6 +495,14 @@ class SubtitleAgentBridge(_PluginBase):
         try:
             file_iter = self.__iter_video_files(scan_root, recursive=recursive_flag)
             for video_file in file_iter:
+                if self.__is_excluded_path(
+                    media_file=video_file,
+                    excluded_paths=excluded_paths,
+                    excluded_keywords=excluded_keywords,
+                ):
+                    excluded += 1
+                    continue
+
                 if name_filter and name_filter not in video_file.name.lower():
                     continue
 
@@ -492,17 +532,34 @@ class SubtitleAgentBridge(_PluginBase):
                     "limit": effective_limit,
                 }
 
-                items, message = self.__search_items(payload)
+                selected_title = payload.get("title")
+                items = []
+                message = None
+                for title_candidate in self.__build_title_candidates(
+                    parsed_title=parsed.get("title"),
+                    media_file=video_file,
+                    name_keyword=name_keyword,
+                ):
+                    payload["title"] = title_candidate
+                    items, message = self.__search_items(payload)
+                    if items:
+                        selected_title = title_candidate
+                        break
+
                 if not items:
                     failed += 1
-                    errors.append(f"{video_file.name}: {message or '未找到字幕'}")
+                    errors.append(
+                        f"{video_file.name}: {self.__normalize_failure_message(message, '未找到字幕')}"
+                    )
                     continue
 
                 selected = self.__pick_item(items, preferred_languages=preferred_languages)
                 content, subtitle_format, message = self.__download_item(selected)
                 if not content:
                     failed += 1
-                    errors.append(f"{video_file.name}: {message or '下载字幕失败'}")
+                    errors.append(
+                        f"{video_file.name}: {self.__normalize_failure_message(message, '下载字幕失败')}"
+                    )
                     continue
 
                 subtitle_path = Path(self.__build_subtitle_path(str(video_file), subtitle_format))
@@ -523,6 +580,7 @@ class SubtitleAgentBridge(_PluginBase):
                     {
                         "video": str(video_file),
                         "subtitle": str(subtitle_path),
+                        "title": selected_title,
                         "provider": selected.get("provider"),
                         "language": selected.get("language"),
                     }
@@ -541,13 +599,17 @@ class SubtitleAgentBridge(_PluginBase):
             "total": processed,
             "success": success,
             "skipped": skipped,
+            "excluded": excluded,
             "failed": failed,
             "errors": errors,
         }
         self.save_data("last_result", result)
 
         if self._notify:
-            text = f"补字幕完成，共扫描 {processed} 个视频，成功 {success} 个，跳过 {skipped} 个，失败 {failed} 个"
+            text = (
+                f"补字幕完成，共扫描 {processed} 个视频，成功 {success} 个，"
+                f"跳过 {skipped} 个，排除 {excluded} 个，失败 {failed} 个"
+            )
             if errors:
                 text = f"{text}\n" + "\n".join(errors[:5])
             self.post_message(
@@ -556,7 +618,7 @@ class SubtitleAgentBridge(_PluginBase):
                 text=text,
             )
 
-        message = f"扫描 {processed} 个视频，成功 {success}，跳过 {skipped}，失败 {failed}"
+        message = f"扫描 {processed} 个视频，成功 {success}，跳过 {skipped}，排除 {excluded}，失败 {failed}"
         return schemas.Response(
             success=failed == 0,
             message=message,
@@ -565,10 +627,13 @@ class SubtitleAgentBridge(_PluginBase):
                 "recursive": recursive_flag,
                 "overwrite": overwrite_flag,
                 "name_contains": name_filter,
+                "exclude_paths": excluded_paths,
+                "exclude_keywords": excluded_keywords,
                 "languages": selected_languages,
                 "total": processed,
                 "success": success,
                 "skipped": skipped,
+                "excluded": excluded,
                 "failed": failed,
                 "items": downloaded[:50],
                 "errors": errors[:50],
@@ -579,7 +644,7 @@ class SubtitleAgentBridge(_PluginBase):
         payload = self.__build_search_payload(mediainfo=mediainfo, meta=meta)
         items, message = self.__search_items(payload)
         if not items:
-            return False, message or "未找到字幕"
+            return False, self.__normalize_failure_message(message, "未找到字幕")
 
         selected = self.__pick_item(items)
         content, subtitle_format, message = self.__download_item(selected)
@@ -655,7 +720,10 @@ class SubtitleAgentBridge(_PluginBase):
         if isinstance(body, dict) and "success" in body:
             if body.get("success") is True and isinstance(body.get("data"), dict):
                 items = body.get("data", {}).get("items") or []
-                return items if isinstance(items, list) else [], body.get("message")
+                item_list = items if isinstance(items, list) else []
+                if item_list:
+                    return item_list, body.get("message")
+                return [], str(body.get("message") or "未找到字幕")
             return [], str(body.get("message") or "字幕检索失败")
 
         # 兼容标准格式
@@ -745,6 +813,38 @@ class SubtitleAgentBridge(_PluginBase):
                 return True
         return False
 
+    def __build_title_candidates(self, parsed_title: Any, media_file: Path, name_keyword: str = "") -> List[str]:
+        candidates: List[str] = []
+        seen = set()
+
+        for raw_title in [parsed_title, name_keyword, media_file.parent.name, media_file.stem]:
+            normalized = self.__clean_title_text(str(raw_title or ""))
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(normalized)
+
+        return candidates
+
+    def __clean_title_text(self, title: str) -> str:
+        value = str(title or "")
+        value = re.sub(r"[\[\(\{][^\]\)\}]*[\]\)\}]", " ", value)
+        value = self._season_episode_pattern.sub(" ", value)
+        value = self._year_pattern.sub(" ", value)
+        value = re.sub(
+            r"(?i)\b(2160p|1080p|720p|480p|x264|x265|h264|h265|hevc|hdr|dv|bluray|bdrip|web[-_. ]?dl|webrip|hdrip|dvdrip|aac|dts|atmos|remux|repack|proper|extended|paramount\+?|netflix|amzn|hmax|hbo|max|disney\+?|atvp)\b",
+            " ",
+            value,
+        )
+        value = re.sub(r"(?i)\b\d+audios?\b", " ", value)
+        value = re.sub(r"-[A-Za-z0-9]{2,}$", " ", value)
+        value = re.sub(r"[._]+", " ", value)
+        value = re.sub(r"\s+", " ", value).strip(" -._")
+        return value
+
     def __parse_media_context_from_file(self, media_file: Path, forced_media_type: str = "") -> Dict[str, Any]:
         raw_name = media_file.stem
         cleaned = re.sub(r"[\[\(\{][^\]\)\}]*[\]\)\}]", " ", raw_name)
@@ -765,19 +865,10 @@ class SubtitleAgentBridge(_PluginBase):
         if year_match:
             year = self.__to_int(year_match.group(1))
 
-        normalized_title = cleaned
-        normalized_title = self._season_episode_pattern.sub(" ", normalized_title)
-        normalized_title = self._year_pattern.sub(" ", normalized_title)
-        normalized_title = re.sub(
-            r"(?i)\b(2160p|1080p|720p|480p|x264|x265|h264|h265|hevc|hdr|dv|bluray|bdrip|web[-_. ]?dl|webrip|hdrip|dvdrip|aac|dts|atmos|remux|repack|proper|extended)\b",
-            " ",
-            normalized_title,
-        )
-        normalized_title = re.sub(r"[._]+", " ", normalized_title)
-        normalized_title = re.sub(r"\s+", " ", normalized_title).strip(" -._")
+        normalized_title = self.__clean_title_text(cleaned)
 
         if not normalized_title:
-            normalized_title = media_file.parent.name
+            normalized_title = self.__clean_title_text(media_file.parent.name)
 
         return {
             "title": normalized_title,
@@ -795,8 +886,33 @@ class SubtitleAgentBridge(_PluginBase):
         return str(Path(media_file).with_suffix(f".{fmt}"))
 
     @staticmethod
+    def __split_csv(value: Any) -> List[str]:
+        return [item.strip() for item in str(value or "").split(",") if item and item.strip()]
+
+    @staticmethod
     def __split_languages(languages: str) -> List[str]:
-        return [item.strip() for item in str(languages).split(",") if item and item.strip()]
+        return SubtitleAgentBridge.__split_csv(languages)
+
+    def __is_excluded_path(self, media_file: Path, excluded_paths: List[str], excluded_keywords: List[str]) -> bool:
+        normalized_file = self.__normalize_path(str(media_file))
+        for raw_path in excluded_paths:
+            path_prefix = self.__normalize_path(raw_path)
+            if not path_prefix:
+                continue
+            if normalized_file == path_prefix or normalized_file.startswith(f"{path_prefix}/"):
+                return True
+
+        for keyword in excluded_keywords:
+            if keyword and keyword.lower() in normalized_file:
+                return True
+        return False
+
+    @staticmethod
+    def __normalize_failure_message(message: Any, default: str) -> str:
+        text = str(message or "").strip()
+        if not text or text.lower() in {"ok", "success", "none"}:
+            return default
+        return text
 
     @staticmethod
     def __to_int(value: Any) -> Optional[int]:
@@ -828,6 +944,10 @@ class SubtitleAgentBridge(_PluginBase):
         if text in {"movie", "film"}:
             return "movie"
         return ""
+
+    @staticmethod
+    def __normalize_path(value: Any) -> str:
+        return str(value or "").replace("\\", "/").strip().rstrip("/").lower()
 
     @staticmethod
     def __normalize_host(host: Any) -> str:
