@@ -104,3 +104,21 @@ def test_archive_with_non_matching_episode_is_rejected():
     )
 
     assert _provider()._candidate_matches_query(candidate, _query()) is False
+
+
+def test_ambiguous_archive_without_title_or_episode_is_rejected():
+    candidate = DirectSubtitleCandidate(
+        provider="assrt",
+        subtitle_id="x-5",
+        title="官方中字压缩包",
+        release_name="S01 字幕打包",
+        language="zh-cn",
+        subtitle_format="srt",
+        download_url="https://assrt.net/download/x-5/demo.zip",
+        page_link="https://assrt.net/xml/sub/5/5.xml",
+        language_tags=["zh-cn"],
+        matches=[],
+        score=0,
+    )
+
+    assert _provider()._candidate_matches_query(candidate, _query()) is False

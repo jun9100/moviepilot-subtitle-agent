@@ -524,8 +524,6 @@ class SubtitleService:
         return f"{merged}.{ext}"
 
     def _build_video(self, query: SearchRequest) -> Any:
-        imdb_id = self._normalize_imdb_for_provider(query.imdb_id)
-
         if query.media_type == "tv":
             season = query.season or 1
             episode = query.episode or 1
@@ -533,10 +531,6 @@ class SubtitleService:
             kwargs: dict[str, Any] = {}
             if query.year:
                 kwargs["year"] = query.year
-            if imdb_id:
-                kwargs["series_imdb_id"] = imdb_id
-            if query.tmdb_id:
-                kwargs["series_tmdb_id"] = query.tmdb_id
 
             return Episode(
                 name=f"{query.title}.S{season:02d}E{episode:02d}",
@@ -549,26 +543,9 @@ class SubtitleService:
         kwargs = {}
         if query.year:
             kwargs["year"] = query.year
-        if imdb_id:
-            kwargs["imdb_id"] = imdb_id
-        if query.tmdb_id:
-            kwargs["tmdb_id"] = query.tmdb_id
 
         return Movie(
             name=query.title,
             title=query.title,
             **kwargs,
         )
-
-    @staticmethod
-    def _normalize_imdb_for_provider(imdb_id: str | None) -> str | None:
-        if not imdb_id:
-            return None
-        cleaned = imdb_id.strip()
-        if not cleaned:
-            return None
-        if cleaned.startswith("tt"):
-            return cleaned
-        if cleaned.isdigit():
-            return f"tt{cleaned}"
-        return cleaned

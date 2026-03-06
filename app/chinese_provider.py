@@ -134,10 +134,6 @@ class ChineseSubtitleProvider:
         seeds: list[str] = []
         if query.title.strip():
             seeds.append(query.title.strip())
-        if query.imdb_id:
-            seeds.append(query.imdb_id)
-        if query.tmdb_id:
-            seeds.append(str(query.tmdb_id))
 
         keywords = list(dict.fromkeys(seed for seed in seeds if seed))
         if not use_subhd:
@@ -468,8 +464,15 @@ class ChineseSubtitleProvider:
         ):
             return True
 
-        # Some in-progress archives do not expose episode numbers in title text.
-        return True
+        # Conservative fallback: require obvious title overlap to avoid cross-show mismatch.
+        query_title = (query.title or "").strip().lower()
+        if query_title:
+            merged_norm = re.sub(r"\s+", "", merged.lower())
+            title_norm = re.sub(r"\s+", "", query_title)
+            if title_norm and title_norm in merged_norm:
+                return True
+
+        return False
 
     @staticmethod
     def _normalize_language_list(languages: list[str]) -> set[str]:

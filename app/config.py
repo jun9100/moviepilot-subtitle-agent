@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.1.2"
+    app_version: str = "0.1.3"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
