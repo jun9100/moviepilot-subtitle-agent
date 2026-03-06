@@ -1,0 +1,25 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Test and coverage outputs
+.coverage
+.coverage.*
+htmlcov/
+
+# Local runtime output
+data/subtitles/
+*.log
+
+# OS/editor noise
+.DS_Store

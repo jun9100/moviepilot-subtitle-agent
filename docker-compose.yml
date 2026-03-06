@@ -1,0 +1,11 @@
+services:
+  subtitle-agent:
+    build: .
+    container_name: moviepilot-subtitle-agent
+    ports:
+      - "8178:8178"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
