@@ -36,6 +36,31 @@ Health check:
 curl http://127.0.0.1:8178/health
 ```
 
+## Docker Quick Start
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+curl http://127.0.0.1:8178/health
+docker compose logs -f subtitle-agent
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+## HTTPS Compatibility (macOS)
+
+On macOS system Python builds that use LibreSSL (for example Python 3.9.6 + LibreSSL 2.8.3),
+`urllib3` v2 may show TLS compatibility warnings and can cause unstable HTTPS behavior in
+`requests`-based providers. This project pins `urllib3<2` on macOS in `requirements.txt` to
+keep subtitle provider HTTPS calls stable.
+
+If you use Python linked to OpenSSL 1.1.1+ (Homebrew/python.org/pyenv builds), this warning
+does not apply.
+
 ## Standard APIs
 
 - `POST /api/v1/subtitles/search`
@@ -52,6 +77,22 @@ Alias routes are also provided:
 
 - `/api/moviepilot/...`
 - `/moviepilot/...`
+
+## MoviePilot Plugin (SubtitleAgentBridge)
+
+Plugin example path:
+
+`moviepilot-plugin-example/plugins.v2/subtitleagentbridge/__init__.py`
+
+Install steps:
+
+1. Copy the `subtitleagentbridge` directory into your MoviePilot `plugins.v2` directory.
+2. Restart MoviePilot and enable `Subtitle Agent Bridge`.
+3. Configure:
+   - `host`: Subtitle Agent URL (for Dockerized MoviePilot, usually `http://host.docker.internal:8178`)
+   - `search_path`: `/api/v1/moviepilot/subtitles/search`
+   - `languages`: `zh-cn,zh-tw`
+4. Trigger a media transfer/import in MoviePilot. The plugin listens to `TransferComplete` and will auto search+download subtitles.
 
 ## Tests
 

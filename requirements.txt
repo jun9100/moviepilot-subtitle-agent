@@ -3,5 +3,9 @@ uvicorn>=0.35.0
 pydantic-settings>=2.10.1
 subliminal>=2.2.1
 httpx>=0.28.1
+# Requests currently warns when paired with chardet>=6; keep a compatible range.
+chardet<6
+# Keep macOS system Python (LibreSSL) HTTPS-compatible for requests/subliminal.
+urllib3<2; sys_platform == "darwin"
 pytest>=8.3.5
 eval-type-backport>=0.2.0

@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -20,9 +21,9 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.0"
-    plugin_author = "codex"
-    author_url = "https://github.com/openai"
+    plugin_version = "0.2.0"
+    plugin_author = "jun9100"
+    author_url = "https://github.com/jun9100/moviepilot-subtitle-agent"
     plugin_config_prefix = "subtitleagentbridge_"
     plugin_order = 50
     auth_level = 1
@@ -30,7 +31,7 @@ class SubtitleAgentBridge(_PluginBase):
     _enabled: bool = False
     _host: str = ""
     _search_path: str = "/api/v1/moviepilot/subtitles/search"
-    _languages: str = "zh,en"
+    _languages: str = "zh-cn,zh-tw"
     _limit: int = 5
     _timeout: int = 20
     _overwrite: bool = False
@@ -43,7 +44,7 @@ class SubtitleAgentBridge(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._host = self.__normalize_host(config.get("host"))
         self._search_path = str(config.get("search_path") or "/api/v1/moviepilot/subtitles/search")
-        self._languages = str(config.get("languages") or "zh,en")
+        self._languages = str(config.get("languages") or "zh-cn,zh-tw")
         self._limit = int(config.get("limit") or 5)
         self._timeout = int(config.get("timeout") or 20)
         self._overwrite = bool(config.get("overwrite"))
@@ -54,7 +55,7 @@ class SubtitleAgentBridge(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        pass
+        return []
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [
@@ -155,7 +156,7 @@ class SubtitleAgentBridge(_PluginBase):
                                         "props": {
                                             "model": "languages",
                                             "label": "字幕语言",
-                                            "placeholder": "zh,en",
+                                            "placeholder": "zh-cn,zh-tw",
                                         },
                                     }
                                 ],
@@ -215,7 +216,7 @@ class SubtitleAgentBridge(_PluginBase):
             "enabled": False,
             "host": "http://127.0.0.1:8178",
             "search_path": "/api/v1/moviepilot/subtitles/search",
-            "languages": "zh,en",
+            "languages": "zh-cn,zh-tw",
             "limit": 5,
             "timeout": 20,
             "overwrite": False,
@@ -304,7 +305,7 @@ class SubtitleAgentBridge(_PluginBase):
 
         failed = max(total - success, 0)
         result = {
-            "time": Path(__file__).stat().st_mtime,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "total": total,
             "success": success,
             "failed": failed,
@@ -354,7 +355,7 @@ class SubtitleAgentBridge(_PluginBase):
         if not items:
             return schemas.Response(success=False, message=message or "未找到可用字幕")
 
-        selected = items[0]
+        selected = self.__pick_item(items)
         content, subtitle_format, message = self.__download_item(selected)
         if not content:
             return schemas.Response(success=False, message=message or "下载字幕失败")
@@ -372,7 +373,9 @@ class SubtitleAgentBridge(_PluginBase):
 
         subtitle_path = self.__build_subtitle_path(target_file, subtitle_format)
         try:
-            Path(subtitle_path).write_bytes(content)
+            subtitle_file = Path(subtitle_path)
+            subtitle_file.parent.mkdir(parents=True, exist_ok=True)
+            subtitle_file.write_bytes(content)
         except Exception as err:
             return schemas.Response(success=False, message=f"写入字幕失败: {str(err)}")
 
@@ -454,9 +457,11 @@ class SubtitleAgentBridge(_PluginBase):
             return [], f"解析搜索结果失败: {str(err)}"
 
         # 兼容 MoviePilot 包装格式
-        if isinstance(body, dict) and body.get("success") is True and isinstance(body.get("data"), dict):
-            items = body.get("data", {}).get("items") or []
-            return items if isinstance(items, list) else [], body.get("message")
+        if isinstance(body, dict) and "success" in body:
+            if body.get("success") is True and isinstance(body.get("data"), dict):
+                items = body.get("data", {}).get("items") or []
+                return items if isinstance(items, list) else [], body.get("message")
+            return [], str(body.get("message") or "字幕检索失败")
 
         # 兼容标准格式
         items = body.get("items") if isinstance(body, dict) else []
@@ -485,6 +490,13 @@ class SubtitleAgentBridge(_PluginBase):
             return None, "srt", "下载接口无响应"
         if res.status_code != 200:
             return None, "srt", f"下载接口返回错误: {res.status_code}"
+
+        try:
+            body = res.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict) and "success" in body and body.get("success") is not True:
+            return None, "srt", str(body.get("message") or "字幕下载失败")
 
         content = res.content
         if not content:
