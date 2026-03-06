@@ -23,7 +23,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.3.1"
+    plugin_version = "0.3.2"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -459,11 +459,16 @@ class SubtitleAgentBridge(_PluginBase):
         errors: List[str] = []
         downloaded: List[Dict[str, Any]] = []
 
+        matched = 0
         try:
-            file_iter = self.__iter_video_files(scan_root, recursive=recursive_flag, max_files=max_file_count)
+            file_iter = self.__iter_video_files(scan_root, recursive=recursive_flag)
             for video_file in file_iter:
                 if name_filter and name_filter not in video_file.name.lower():
                     continue
+
+                matched += 1
+                if matched > max_file_count:
+                    break
 
                 processed += 1
 
@@ -717,8 +722,7 @@ class SubtitleAgentBridge(_PluginBase):
             ".webm",
         }
 
-    def __iter_video_files(self, root: Path, recursive: bool, max_files: int) -> Iterator[Path]:
-        file_count = 0
+    def __iter_video_files(self, root: Path, recursive: bool) -> Iterator[Path]:
         iterator = root.rglob("*") if recursive else root.iterdir()
         for path in iterator:
             if not path.is_file():
@@ -726,9 +730,6 @@ class SubtitleAgentBridge(_PluginBase):
             if not self.__is_video_file(str(path)):
                 continue
             yield path
-            file_count += 1
-            if file_count >= max_files:
-                break
 
     def __has_subtitle(self, media_file: Path) -> bool:
         prefix = media_file.stem
