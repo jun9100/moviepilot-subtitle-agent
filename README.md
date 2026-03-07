@@ -74,10 +74,10 @@ environment:
 环境变量：`PROVIDER_STAGE_ORDER`
 
 - 语法：每一层用 `|` 分隔，层内 provider 用 `,` 分隔。
-- 示例（OpenSubtitles 优先）：
+- 示例（推荐：中文源优先，OpenSubtitles 最后）：
 
 ```env
-PROVIDER_STAGE_ORDER=opensubtitlescom,opensubtitles|assrt,subhd,subhdtw|podnapisi,tvsubtitles
+PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,opensubtitles
 ```
 
 ### 2) 错剧/错集控制

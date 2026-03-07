@@ -13,7 +13,7 @@ services:
 
       DEFAULT_LANGUAGES: "zh-cn,zh-tw"
       DEFAULT_PROVIDERS: "assrt,subhd,subhdtw"
-      PROVIDER_STAGE_ORDER: ""
+      PROVIDER_STAGE_ORDER: "assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,opensubtitles"
       ENABLE_SUBLIMINAL_FALLBACK: "true"
       SUBLIMINAL_FALLBACK_PROVIDERS: "podnapisi,tvsubtitles,opensubtitlescom,opensubtitles"
       MAX_RESULTS: "30"
