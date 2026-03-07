@@ -19,6 +19,31 @@ from .models import SearchRequest
 CHINESE_LANG_CODES = {"zh", "zh-cn", "zh-hans", "zh-tw", "zh-hant", "chs", "cht", "chi", "zho"}
 SUBTITLE_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
 SUBHD_MIRRORS = ("subhd.tv", "subhdtw.com", "subhd.cc", "subhd.me")
+TITLE_NOISE_TOKENS = {
+    "1080p",
+    "2160p",
+    "720p",
+    "webrip",
+    "web",
+    "webdl",
+    "bluray",
+    "bdrip",
+    "x264",
+    "x265",
+    "h264",
+    "h265",
+    "hevc",
+    "aac",
+    "ddp",
+    "hdr",
+    "dv",
+    "srt",
+    "ass",
+    "ssa",
+    "vtt",
+    "mkv",
+    "mp4",
+}
 
 
 @dataclass
@@ -661,6 +686,11 @@ class ChineseSubtitleProvider:
             # cases like "National Treasure" (movie) vs "The Lost National Treasure" (series).
             if self._looks_like_tv_candidate(merged):
                 return False
+            title_overlap = self._title_overlap_score(query.title, merged)
+            chinese_overlap = self._chinese_overlap_score(query.title, merged)
+            # If both sides contain Chinese words but no overlap, this is usually a wrong movie.
+            if chinese_overlap == 0.0 and title_overlap < 0.12:
+                return False
 
         if query.year:
             year_match = re.search(r"\b(19\d{2}|20\d{2})\b", merged)
@@ -855,9 +885,6 @@ class ChineseSubtitleProvider:
         if "zh-cn" in candidate.language_tags and "zh-tw" in candidate.language_tags:
             score += 20
 
-        if "bilingual" in candidate.language_tags:
-            score += 8
-
         ext = Path(urlparse(candidate.download_url).path).suffix.lower()
         if ext == ".zip":
             score += 25
@@ -872,6 +899,16 @@ class ChineseSubtitleProvider:
         merged = f"{candidate.title} {candidate.release_name}".lower()
         if query.title.lower() in merged:
             score += 12
+        title_overlap = self._title_overlap_score(query.title, merged)
+        score += int(round(title_overlap * 70))
+        if title_overlap == 0:
+            score -= 20
+
+        chinese_overlap = self._chinese_overlap_score(query.title, merged)
+        if chinese_overlap > 0:
+            score += int(round(chinese_overlap * 40))
+        elif chinese_overlap == 0:
+            score -= 60
 
         season_episode = self._extract_season_episode(merged)
         if season_episode and query.media_type == "tv":
@@ -908,11 +945,86 @@ class ChineseSubtitleProvider:
                 score -= 220
             else:
                 score += 20
+            if chinese_overlap == 0:
+                score -= 120
 
         if "官方" in candidate.release_name:
             score += 6
 
+        if "bilingual" in candidate.language_tags:
+            score += 12
+
         return score
+
+    @staticmethod
+    def _contains_cjk(text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+    @staticmethod
+    def _normalize_title_text(text: str) -> str:
+        lowered = str(text or "").lower()
+        lowered = re.sub(r"[._\-]+", " ", lowered)
+        lowered = re.sub(r"[\[\](){}]+", " ", lowered)
+        lowered = re.sub(r"\s+", " ", lowered).strip()
+        return lowered
+
+    @classmethod
+    def _title_tokens(cls, text: str) -> set[str]:
+        normalized = cls._normalize_title_text(text)
+        tokens: set[str] = set()
+        for token in re.findall(r"[a-z0-9]{2,}", normalized):
+            if token in TITLE_NOISE_TOKENS:
+                continue
+            tokens.add(token)
+        for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
+            tokens.add(chunk)
+            if len(chunk) >= 2:
+                for i in range(len(chunk) - 1):
+                    tokens.add(chunk[i : i + 2])
+        return tokens
+
+    @classmethod
+    def _title_overlap_score(cls, query_title: str, candidate_text: str) -> float:
+        query_tokens = cls._title_tokens(query_title)
+        if not query_tokens:
+            return 0.0
+        candidate_tokens = cls._title_tokens(candidate_text)
+        if not candidate_tokens:
+            return 0.0
+
+        intersection = len(query_tokens & candidate_tokens)
+        recall = intersection / max(1, len(query_tokens))
+        precision = intersection / max(1, len(candidate_tokens))
+        score = (recall * 0.7) + (precision * 0.3)
+
+        q_compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", cls._normalize_title_text(query_title))
+        c_compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", cls._normalize_title_text(candidate_text))
+        if len(q_compact) >= 2 and q_compact in c_compact:
+            score = max(score, 0.55)
+
+        return min(1.0, score)
+
+    @classmethod
+    def _chinese_overlap_score(cls, query_title: str, candidate_text: str) -> float:
+        if not cls._contains_cjk(query_title):
+            return -1.0
+        if not cls._contains_cjk(candidate_text):
+            return -1.0
+
+        query_tokens = {
+            token
+            for token in cls._title_tokens(query_title)
+            if re.search(r"[\u4e00-\u9fff]", token)
+        }
+        candidate_tokens = {
+            token
+            for token in cls._title_tokens(candidate_text)
+            if re.search(r"[\u4e00-\u9fff]", token)
+        }
+        if not query_tokens or not candidate_tokens:
+            return 0.0
+
+        return len(query_tokens & candidate_tokens) / max(1, len(query_tokens))
 
     @staticmethod
     def _dedupe_candidates(candidates: list[DirectSubtitleCandidate]) -> list[DirectSubtitleCandidate]:

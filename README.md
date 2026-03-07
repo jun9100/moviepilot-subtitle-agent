@@ -125,6 +125,7 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 
 ## 更新记录（近期）
 
+- `v0.2.5`：参考 ChineseSubFinder 的候选过滤思路，新增标题词元重叠评分（含中文词元），并在电影请求中拒绝“中文标题零重叠”的误匹配候选，显著降低电影/剧集同名干扰。
 - `v0.2.4`：Docker 镜像补齐 `bsdtar` 依赖（`libarchive-tools`），修复 RAR 字幕包在容器内无法解压导致的下载失败。
 - `v0.2.3`：增强电影/剧集候选区分（电影请求会过滤明显剧集整季包），并在直连下载失败时明确提示已尝试 fallback 源但未命中可下载中文字幕。
 - `v0.2.2`：新增“阶段内并发检索”（阶段间仍保序）；并发下继续保持下载失败自动换候选与跨阶段重试。

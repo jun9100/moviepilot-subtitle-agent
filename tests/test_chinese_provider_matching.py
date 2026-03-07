@@ -254,3 +254,53 @@ def test_movie_scoring_prefers_movie_release_over_series_pack():
     )
 
     assert provider._score_candidate(movie_release, movie_query) > provider._score_candidate(series_pack, movie_query)
+
+
+def test_movie_query_rejects_unrelated_chinese_title_with_zero_overlap():
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="x-cn-zero",
+        title="护宝寻踪",
+        release_name="护宝寻踪 S01 官方简繁字幕",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/x-cn-zero",
+        page_link="https://subhd.tv/a/x-cn-zero",
+        language_tags=["zh-cn", "zh-tw"],
+        matches=[],
+        score=0,
+    )
+    movie_query = SearchRequest(
+        title="国宝",
+        media_type="movie",
+        year=2025,
+        languages=["zh-cn", "zh-tw"],
+        limit=10,
+    )
+
+    assert _provider()._candidate_matches_query(candidate, movie_query) is False
+
+
+def test_movie_query_keeps_english_candidate_for_chinese_query():
+    candidate = DirectSubtitleCandidate(
+        provider="assrt",
+        subtitle_id="x-en-only",
+        title="Kokuho",
+        release_name="Kokuho.2025.1080p.WEBRip.x264.AAC.2.0-CabPro",
+        language="zh-cn",
+        subtitle_format="srt",
+        download_url="https://assrt.net/download/x-en-only/demo.srt",
+        page_link="https://assrt.net/xml/sub/1/1.xml",
+        language_tags=["zh-cn"],
+        matches=["resolution"],
+        score=0,
+    )
+    movie_query = SearchRequest(
+        title="国宝",
+        media_type="movie",
+        year=2025,
+        languages=["zh-cn", "zh-tw"],
+        limit=10,
+    )
+
+    assert _provider()._candidate_matches_query(candidate, movie_query) is True
