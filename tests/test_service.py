@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import types
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -243,6 +244,7 @@ def test_search_fallback_chain_tries_secondary_then_opensubtitles(tmp_path):
             subtitle_output_dir=tmp_path,
             enable_subliminal_fallback=True,
             subliminal_fallback_providers="podnapisi,tvsubtitles,opensubtitlescom,opensubtitles",
+            enable_parallel_search=False,
         ),
         chinese_provider=provider,
     )
@@ -282,6 +284,7 @@ def test_search_stops_before_opensubtitles_when_secondary_has_results(tmp_path):
             subtitle_output_dir=tmp_path,
             enable_subliminal_fallback=True,
             subliminal_fallback_providers="podnapisi,tvsubtitles,opensubtitlescom,opensubtitles",
+            enable_parallel_search=False,
         ),
         chinese_provider=provider,
     )
@@ -336,6 +339,7 @@ def test_search_respects_custom_provider_stage_order(tmp_path):
             enable_subliminal_fallback=True,
             provider_stage_order="opensubtitlescom,opensubtitles|assrt,subhd,subhdtw",
             min_score=0,
+            enable_parallel_search=False,
         ),
         chinese_provider=provider,
     )
@@ -377,6 +381,63 @@ def test_search_respects_custom_provider_stage_order(tmp_path):
     assert result.items[0].provider == "opensubtitlescom"
     assert calls == [["opensubtitlescom", "opensubtitles"]]
     assert provider.search_calls == 0
+
+
+def test_parallel_search_splits_subliminal_providers(tmp_path):
+    provider = FakeChineseProvider([])
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            provider_stage_order="opensubtitlescom,opensubtitles",
+            enable_subliminal_fallback=False,
+            min_score=0,
+            enable_parallel_search=True,
+            search_workers=4,
+        ),
+        chinese_provider=provider,
+    )
+
+    lock = threading.Lock()
+    calls: list[str] = []
+
+    def fake_search_with_subliminal(self, *, query, providers, stage_index=None):
+        assert len(providers) == 1
+        provider_name = providers[0]
+        with lock:
+            calls.append(provider_name)
+        return [
+            SubtitleSearchItem(
+                token=f"t-{provider_name}",
+                provider=provider_name,
+                subtitle_id=f"{provider_name}-1",
+                title=query.title,
+                language="zh",
+                score=88,
+                matches=[],
+                hearing_impaired=None,
+                page_link=None,
+                subtitle_format="srt",
+                download_url=f"/api/v1/subtitles/fetch/t-{provider_name}",
+            )
+        ]
+
+    service._search_with_subliminal_providers = types.MethodType(fake_search_with_subliminal, service)
+
+    result = service.search(
+        SearchRequest(
+            title="短剧开始啦",
+            media_type="tv",
+            season=1,
+            episode=3,
+            languages=["zh-cn", "zh-tw"],
+            limit=5,
+        )
+    )
+
+    assert result.total == 2
+    assert sorted(calls) == ["opensubtitles", "opensubtitlescom"]
 
 
 def test_download_uses_subliminal_fallback_when_direct_candidates_fail(tmp_path):

@@ -11,6 +11,7 @@
 - 多源分层检索：`assrt/subhd/subhdtw` → `podnapisi/tvsubtitles` → `opensubtitles`（可配置，不写死）。
 - OpenSubtitles 仅作为最后兜底。
 - 下载自动重试：先换同阶段候选，再自动进入下一阶段源，减少“搜到但下不下来”。
+- 阶段内并发检索：同一层多个 provider 并发查找，缩短慢站点等待时间。
 
 ## 主要功能
 
@@ -86,6 +87,11 @@ PROVIDER_STAGE_ORDER=opensubtitlescom,opensubtitles|assrt,subhd,subhdtw|podnapis
   - `true`（默认）：允许整季包用于单集请求（命中率更高）。
   - `false`：仅接受更严格的单集匹配（准确率更高）。
 
+### 3) 阶段内并发搜索（可配置）
+
+- `ENABLE_PARALLEL_SEARCH`：是否启用同阶段 provider 并发检索（默认 `true`）。
+- `SEARCH_WORKERS`：并发线程数（默认 `6`）。
+
 ## 标准 API
 
 - `POST /api/v1/subtitles/search`
@@ -119,6 +125,7 @@ PROVIDER_STAGE_ORDER=opensubtitlescom,opensubtitles|assrt,subhd,subhdtw|podnapis
 
 ## 更新记录（近期）
 
+- `v0.2.2`：新增“阶段内并发检索”（阶段间仍保序）；并发下继续保持下载失败自动换候选与跨阶段重试。
 - `v0.2.1`：下载失败时自动在同阶段切换候选，仍失败则自动进入下一阶段 provider 重试（覆盖 `subliminal/direct` 混合场景）。
 - `v0.2.0`：新增 `PROVIDER_STAGE_ORDER`、`MIN_SCORE`、`ALLOW_SEASON_PACK_FOR_EPISODE`，支持按用户偏好调整源优先级与匹配严格度（不再写死顺序）。
 - `v0.1.9`：新增 `subhdtw` 直连源，并为 `subhd/subhdtw` 下载加入多镜像轮询重试（`subhd.tv/subhdtw.com/subhd.cc/subhd.me`）。

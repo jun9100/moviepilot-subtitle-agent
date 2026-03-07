@@ -1,12 +1,12 @@
 services:
   subtitle-agent:
-    image: jun9100/moviepilot-subtitle-agent:v0.2.1
+    image: jun9100/moviepilot-subtitle-agent:v0.2.2
     container_name: moviepilot-subtitle-agent
     ports:
       - "8178:8178"
     environment:
       APP_NAME: "MoviePilot Subtitle Agent"
-      APP_VERSION: "0.2.1"
+      APP_VERSION: "0.2.2"
       HOST: "0.0.0.0"
       PORT: "8178"
       DEBUG: "false"
@@ -18,6 +18,8 @@ services:
       SUBLIMINAL_FALLBACK_PROVIDERS: "podnapisi,tvsubtitles,opensubtitlescom,opensubtitles"
       MAX_RESULTS: "30"
       MIN_SCORE: "0"
+      ENABLE_PARALLEL_SEARCH: "true"
+      SEARCH_WORKERS: "6"
       TOKEN_TTL_SECONDS: "1800"
       REQUEST_TIMEOUT_SECONDS: "20"
       SUBTITLE_OUTPUT_DIR: "data/subtitles"

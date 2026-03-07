@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,7 +16,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.2.1"
+    app_version: str = "0.2.2"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
@@ -33,6 +34,8 @@ class Settings(BaseSettings):
     subliminal_fallback_providers: str = "podnapisi,tvsubtitles,opensubtitlescom,opensubtitles"
     max_results: int = 30
     min_score: int = 0
+    enable_parallel_search: bool = True
+    search_workers: int = 6
     token_ttl_seconds: int = 1800
     request_timeout_seconds: int = 20
     user_agent: str = "MoviePilotSubtitleAgent/0.2"
@@ -57,6 +60,17 @@ class Settings(BaseSettings):
             if normalized in {"release", "prod", "production"}:
                 return False
         return value
+
+    @field_validator("search_workers", mode="before")
+    @classmethod
+    def normalize_search_workers(cls, value: Any) -> int:
+        if value is None:
+            return 6
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 6
+        return max(1, parsed)
 
     @property
     def provider_list(self) -> list[str]:

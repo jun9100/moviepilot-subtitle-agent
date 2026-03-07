@@ -68,6 +68,8 @@ def create_app(
             "provider_stages": settings_state.provider_stage_list,
             "fallback_providers": settings_state.subliminal_provider_list,
             "min_score": settings_state.min_score,
+            "enable_parallel_search": settings_state.enable_parallel_search,
+            "search_workers": settings_state.search_workers,
             "default_languages": settings_state.language_list,
         }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import re
 import threading
@@ -67,34 +68,13 @@ class SubtitleService:
         last_error: Exception | None = None
 
         for stage_index, stage_providers in enumerate(self._settings.provider_stage_list):
-            stage_results: list[SubtitleSearchItem] = []
-
-            direct_providers = [item for item in stage_providers if item.lower() in self._DIRECT_PROVIDER_NAMES]
-            subliminal_providers = [item for item in stage_providers if item.lower() not in self._DIRECT_PROVIDER_NAMES]
-
-            if direct_providers:
-                try:
-                    stage_results.extend(
-                        self._search_with_direct_providers(
-                            query=query,
-                            providers=direct_providers,
-                            stage_index=stage_index,
-                        )
-                    )
-                except Exception as exc:
-                    last_error = exc
-
-            if subliminal_providers:
-                try:
-                    stage_results.extend(
-                        self._search_with_subliminal_providers(
-                            query=query,
-                            providers=subliminal_providers,
-                            stage_index=stage_index,
-                        )
-                    )
-                except Exception as exc:
-                    last_error = exc
+            stage_results, stage_error = self._search_stage_items(
+                query=query,
+                stage_index=stage_index,
+                stage_providers=stage_providers,
+            )
+            if stage_error is not None:
+                last_error = stage_error
 
             stage_results = [item for item in stage_results if item.score >= self._settings.min_score]
             if stage_results:
@@ -120,6 +100,89 @@ class SubtitleService:
             total=len(results),
             items=results[:limit],
         )
+
+    def _search_stage_items(
+        self,
+        *,
+        query: SearchRequest,
+        stage_index: int,
+        stage_providers: list[str],
+    ) -> tuple[list[SubtitleSearchItem], Exception | None]:
+        direct_providers = [item for item in stage_providers if item.lower() in self._DIRECT_PROVIDER_NAMES]
+        subliminal_providers = [item for item in stage_providers if item.lower() not in self._DIRECT_PROVIDER_NAMES]
+
+        tasks: list[tuple[str, Callable[[], list[SubtitleSearchItem]]]] = []
+        if self._settings.enable_parallel_search:
+            for provider in direct_providers:
+                tasks.append(
+                    (
+                        f"direct:{provider}",
+                        lambda provider=provider: self._search_with_direct_providers(
+                            query=query,
+                            providers=[provider],
+                            stage_index=stage_index,
+                        ),
+                    )
+                )
+            for provider in subliminal_providers:
+                tasks.append(
+                    (
+                        f"subliminal:{provider}",
+                        lambda provider=provider: self._search_with_subliminal_providers(
+                            query=query,
+                            providers=[provider],
+                            stage_index=stage_index,
+                        ),
+                    )
+                )
+        else:
+            if direct_providers:
+                tasks.append(
+                    (
+                        "direct",
+                        lambda: self._search_with_direct_providers(
+                            query=query,
+                            providers=direct_providers,
+                            stage_index=stage_index,
+                        ),
+                    )
+                )
+            if subliminal_providers:
+                tasks.append(
+                    (
+                        "subliminal",
+                        lambda: self._search_with_subliminal_providers(
+                            query=query,
+                            providers=subliminal_providers,
+                            stage_index=stage_index,
+                        ),
+                    )
+                )
+
+        if not tasks:
+            return [], None
+
+        stage_results: list[SubtitleSearchItem] = []
+        stage_error: Exception | None = None
+
+        if (not self._settings.enable_parallel_search) or len(tasks) == 1:
+            for _label, task in tasks:
+                try:
+                    stage_results.extend(task())
+                except Exception as exc:
+                    stage_error = exc
+        else:
+            max_workers = max(1, min(self._settings.search_workers, len(tasks)))
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="subtitle-stage") as pool:
+                futures = {pool.submit(task): label for label, task in tasks}
+                for future in as_completed(futures):
+                    try:
+                        stage_results.extend(future.result())
+                    except Exception as exc:
+                        stage_error = exc
+
+        stage_results = self._dedupe_search_items(stage_results)
+        return stage_results, stage_error
 
     def _search_with_direct_providers(
         self,
@@ -294,15 +357,15 @@ class SubtitleService:
             if not providers:
                 continue
 
-            try:
-                items = self._search_with_subliminal_providers(
-                    query=query,
-                    providers=providers,
-                    stage_index=stage_index,
-                )
-            except Exception as exc:
-                search_error = exc
-                continue
+            items, stage_error = self._search_stage_items(
+                query=query,
+                stage_index=stage_index,
+                stage_providers=providers,
+            )
+            if stage_error is not None:
+                search_error = stage_error
+                if not items:
+                    continue
 
             items = [item for item in items if item.score >= self._settings.min_score]
             items.sort(key=lambda item: item.score, reverse=True)
@@ -394,33 +457,13 @@ class SubtitleService:
 
         for stage_index in range(start_stage_index, len(stages)):
             stage_providers = stages[stage_index]
-            direct_providers = [item for item in stage_providers if item.lower() in self._DIRECT_PROVIDER_NAMES]
-            subliminal_providers = [item for item in stage_providers if item.lower() not in self._DIRECT_PROVIDER_NAMES]
-
-            stage_items: list[SubtitleSearchItem] = []
-            if direct_providers:
-                try:
-                    stage_items.extend(
-                        self._search_with_direct_providers(
-                            query=query,
-                            providers=direct_providers,
-                            stage_index=stage_index,
-                        )
-                    )
-                except Exception as exc:
-                    last_search_error = exc
-
-            if subliminal_providers:
-                try:
-                    stage_items.extend(
-                        self._search_with_subliminal_providers(
-                            query=query,
-                            providers=subliminal_providers,
-                            stage_index=stage_index,
-                        )
-                    )
-                except Exception as exc:
-                    last_search_error = exc
+            stage_items, stage_error = self._search_stage_items(
+                query=query,
+                stage_index=stage_index,
+                stage_providers=stage_providers,
+            )
+            if stage_error is not None:
+                last_search_error = stage_error
 
             stage_items = [item for item in stage_items if item.score >= self._settings.min_score]
             stage_items.sort(key=lambda item: item.score, reverse=True)
@@ -705,6 +748,17 @@ class SubtitleService:
     @staticmethod
     def _subtitle_item_key(provider: str, subtitle_id: str) -> tuple[str, str]:
         return provider.strip().lower(), subtitle_id.strip()
+
+    def _dedupe_search_items(self, items: list[SubtitleSearchItem]) -> list[SubtitleSearchItem]:
+        seen: set[tuple[str, str]] = set()
+        deduped: list[SubtitleSearchItem] = []
+        for item in items:
+            key = self._subtitle_item_key(item.provider, item.subtitle_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
 
     def _entry_key(self, entry: CachedSubtitle) -> tuple[str, str] | None:
         if entry.kind == "direct" and isinstance(entry.payload, DirectSubtitleCandidate):
