@@ -656,6 +656,11 @@ class ChineseSubtitleProvider:
                     ):
                         # Episodic requests should avoid ambiguous single-file subtitles.
                         return False
+        elif query.media_type == "movie":
+            # Movie queries should avoid season/episode packs to reduce title collision
+            # cases like "National Treasure" (movie) vs "The Lost National Treasure" (series).
+            if self._looks_like_tv_candidate(merged):
+                return False
 
         if query.year:
             year_match = re.search(r"\b(19\d{2}|20\d{2})\b", merged)
@@ -782,6 +787,27 @@ class ChineseSubtitleProvider:
         return False
 
     @staticmethod
+    def _looks_like_tv_candidate(text: str) -> bool:
+        merged = str(text or "")
+        if ChineseSubtitleProvider._extract_season_episode(merged):
+            return True
+        if ChineseSubtitleProvider._extract_season(merged) is not None:
+            return True
+        if ChineseSubtitleProvider._extract_episode_from_text(merged) is not None:
+            return True
+        if ChineseSubtitleProvider._extract_episode_range(merged):
+            return True
+        if ChineseSubtitleProvider._extract_episode_upper_bound(merged) is not None:
+            return True
+
+        if re.search(
+            r"(?i)\b(episode|season|complete|全集|全季|合集|更新至|s\d{1,2}\s*complete|season\s*\d+\s*complete)\b",
+            merged,
+        ):
+            return True
+        return False
+
+    @staticmethod
     def _normalize_language_list(languages: list[str]) -> set[str]:
         result: set[str] = set()
         for language in languages:
@@ -877,6 +903,11 @@ class ChineseSubtitleProvider:
                 score += 15
             else:
                 score -= 50
+        elif query.media_type == "movie":
+            if self._looks_like_tv_candidate(merged):
+                score -= 220
+            else:
+                score += 20
 
         if "官方" in candidate.release_name:
             score += 6

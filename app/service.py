@@ -283,6 +283,7 @@ class SubtitleService:
         max_attempts = 8
         attempts = 0
         last_error: Exception | None = None
+        fallback_checked = False
 
         for current_candidate in candidates_to_try:
             if attempts >= max_attempts:
@@ -312,6 +313,7 @@ class SubtitleService:
             )
 
         if self._settings.enable_subliminal_fallback:
+            fallback_checked = True
             try:
                 fallback_subtitle = self._fetch_with_subliminal_fallback(
                     query=query,
@@ -331,6 +333,13 @@ class SubtitleService:
                 return fallback_subtitle
 
         if last_error:
+            if fallback_checked:
+                providers = ",".join(self._settings.subliminal_provider_list) or "none"
+                raise SubtitleDownloadError(
+                    "failed to get verified Chinese subtitle from direct candidates: "
+                    f"{last_error}; fallback providers attempted ({providers}) "
+                    "but no verified Chinese subtitle found"
+                ) from last_error
             raise SubtitleDownloadError(
                 f"failed to get verified Chinese subtitle from direct candidates: {last_error}"
             ) from last_error

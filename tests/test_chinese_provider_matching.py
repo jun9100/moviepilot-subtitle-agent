@@ -190,3 +190,67 @@ def test_search_ignores_assrt_errors_and_returns_empty(monkeypatch):
 
     results = provider.search(_query(), providers=["assrt"])
     assert results == []
+
+
+def test_movie_query_rejects_series_pack_candidate():
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="kAx98K",
+        title="护宝寻踪",
+        release_name="The Lost National Treasure S01 (2025) WEB 简繁字幕",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/kAx98K",
+        page_link="https://subhd.tv/a/kAx98K",
+        language_tags=["zh-cn", "zh-tw"],
+        matches=[],
+        score=0,
+    )
+    movie_query = SearchRequest(
+        title="国宝",
+        media_type="movie",
+        year=2025,
+        languages=["zh-cn", "zh-tw"],
+        limit=10,
+    )
+
+    assert _provider()._candidate_matches_query(candidate, movie_query) is False
+
+
+def test_movie_scoring_prefers_movie_release_over_series_pack():
+    provider = _provider()
+    movie_query = SearchRequest(
+        title="国宝",
+        media_type="movie",
+        year=2025,
+        languages=["zh-cn", "zh-tw"],
+        limit=10,
+    )
+    series_pack = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="kAx98K",
+        title="护宝寻踪",
+        release_name="The Lost National Treasure S01 (2025) WEB 简繁字幕",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/kAx98K",
+        page_link="https://subhd.tv/a/kAx98K",
+        language_tags=["zh-cn", "zh-tw"],
+        matches=[],
+        score=0,
+    )
+    movie_release = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="N2tccz",
+        title="国宝",
+        release_name="国宝.Kokuho.2025.1080p.WEBRip.x264.AAC.2.0-CabPro",
+        language="zh-cn",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/N2tccz",
+        page_link="https://subhd.tv/a/N2tccz",
+        language_tags=["zh-cn"],
+        matches=["resolution"],
+        score=0,
+    )
+
+    assert provider._score_candidate(movie_release, movie_query) > provider._score_candidate(series_pack, movie_query)

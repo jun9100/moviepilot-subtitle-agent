@@ -10,11 +10,13 @@ class FakeChineseProvider:
         *,
         content: bytes | None = None,
         content_by_subtitle_id: dict[str, bytes] | None = None,
+        error_by_subtitle_id: dict[str, Exception] | None = None,
         subtitle_format: str = "srt",
     ) -> None:
         self.candidates = candidates
         self.content = content or "1\n00:00:00,000 --> 00:00:01,000\n测试中文字幕\n".encode("utf-8")
         self.content_by_subtitle_id = content_by_subtitle_id or {}
+        self.error_by_subtitle_id = error_by_subtitle_id or {}
         self.subtitle_format = subtitle_format
         self.search_calls = 0
 
@@ -23,6 +25,9 @@ class FakeChineseProvider:
         return list(self.candidates)
 
     def download(self, candidate, *, query):
+        forced_error = self.error_by_subtitle_id.get(candidate.subtitle_id)
+        if forced_error is not None:
+            raise forced_error
         content = self.content_by_subtitle_id.get(candidate.subtitle_id, self.content)
         return DownloadedSubtitle(
             content=content,

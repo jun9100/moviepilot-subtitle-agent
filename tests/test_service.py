@@ -604,3 +604,45 @@ def test_download_falls_through_to_next_stage_when_first_stage_fails(tmp_path):
     assert downloaded.provider == "assrt"
     assert downloaded.subtitle_id == "assrt-zh"
     assert provider.search_calls == 1
+
+
+def test_download_error_mentions_fallback_attempts_when_exhausted(tmp_path):
+    provider = FakeChineseProvider(
+        [make_candidate(subtitle_id="s-direct", score=88)],
+        error_by_subtitle_id={"s-direct": SubtitleDownloadError("subhd mirrors require captcha verification")},
+    )
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="subhd",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            token_ttl_seconds=3600,
+            enable_subliminal_fallback=True,
+            subliminal_fallback_providers="podnapisi,tvsubtitles,opensubtitlescom",
+        ),
+        backend=_FakeBackend(),
+        chinese_provider=provider,
+    )
+
+    def fake_search_with_subliminal(self, *, query, providers, stage_index=None):
+        return []
+
+    service._search_with_subliminal_providers = types.MethodType(fake_search_with_subliminal, service)
+
+    search_result = service.search(
+        SearchRequest(
+            title="国宝",
+            media_type="movie",
+            year=2025,
+            languages=["zh-cn", "zh-tw"],
+            limit=5,
+        )
+    )
+    token = search_result.items[0].token
+
+    with pytest.raises(SubtitleDownloadError) as exc:
+        service.download_to_disk(token)
+
+    message = str(exc.value)
+    assert "fallback providers attempted" in message
+    assert "podnapisi,tvsubtitles,opensubtitlescom" in message

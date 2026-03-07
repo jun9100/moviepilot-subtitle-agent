@@ -125,6 +125,7 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 
 ## 更新记录（近期）
 
+- `v0.2.3`：增强电影/剧集候选区分（电影请求会过滤明显剧集整季包），并在直连下载失败时明确提示已尝试 fallback 源但未命中可下载中文字幕。
 - `v0.2.2`：新增“阶段内并发检索”（阶段间仍保序）；并发下继续保持下载失败自动换候选与跨阶段重试。
 - `v0.2.1`：下载失败时自动在同阶段切换候选，仍失败则自动进入下一阶段 provider 重试（覆盖 `subliminal/direct` 混合场景）。
 - `v0.2.0`：新增 `PROVIDER_STAGE_ORDER`、`MIN_SCORE`、`ALLOW_SEASON_PACK_FOR_EPISODE`，支持按用户偏好调整源优先级与匹配严格度（不再写死顺序）。
