@@ -101,7 +101,13 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 - `ENABLE_PARALLEL_SEARCH`：是否启用同阶段 provider 并发检索（默认 `true`）。
 - `SEARCH_WORKERS`：并发线程数（默认 `6`）。
 
-### 5) subhd 验证码干扰缓解（可配置）
+### 5) 自适应源优先级（可配置）
+
+- `ENABLE_ADAPTIVE_PROVIDER_PRIORITY`：默认 `true`。按历史表现自动重排分级内 provider：优先“可搜索且可下载”来源，其次“可搜索但下载失败”来源，再其次未知来源。
+- `PROVIDER_PRIORITY_STATS_FILE`：provider 统计持久化文件（默认 `data/provider_priority_stats.json`）。
+- `PROVIDER_PRIORITY_PERSIST_INTERVAL_SECONDS`：统计落盘间隔（默认 `30` 秒）。
+
+### 6) subhd 验证码干扰缓解（可配置）
 
 - `SUBHD_CAPTCHA_COOLDOWN_SECONDS`：subhd 返回验证码后，镜像进入冷却时间（默认 `1800` 秒），避免反复触发验证码。
 - `SUBHD_COOKIE_STRING`：手动注入 Cookie 字符串（例如 `cf_clearance=...; session=...`），会自动应用到 `subhd.tv/subhdtw.com/subhd.cc/subhd.me`。
@@ -143,6 +149,7 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 
 ## 更新记录（近期）
 
+- `v0.2.13`：新增“分级内自适应 provider 优先级”：按历史检索/下载成功率动态重排分级内源（保持分级与并发策略不变），优先可自动下载的来源。
 - `v0.2.12`：细化 `subhd` 失败原因文案，明确提示“站点验证（/ajax/gzh）导致无法自动下载”，便于插件通知和用户手动处理。
 - `v0.2.11`：CookieCloud 配置改为通用命名 `COOKIECLOUD_*`（兼容旧的 `SUBHD_COOKIECLOUD_*`），避免误导为仅限 subhd。
 - `v0.2.10`：新增 CookieCloud 自动拉取 `subhd` Cookie（URL/KEY/PASSWORD 配置），支持定时同步并在验证码失败后强制刷新一次，减少手工维护 Cookie。

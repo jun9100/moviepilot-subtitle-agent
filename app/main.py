@@ -70,6 +70,8 @@ def create_app(
             "min_score": settings_state.min_score,
             "enable_parallel_search": settings_state.enable_parallel_search,
             "search_workers": settings_state.search_workers,
+            "enable_adaptive_provider_priority": settings_state.enable_adaptive_provider_priority,
+            "provider_priority_stats_file": str(settings_state.provider_priority_stats_file),
             "strict_media_type_filter": settings_state.strict_media_type_filter,
             "enable_content_language_validation": settings_state.enable_content_language_validation,
             "chinese_confidence_threshold": settings_state.chinese_confidence_threshold,

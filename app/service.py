@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 import hashlib
 import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import time
 from typing import Any, Callable
 from urllib.parse import unquote
 from uuid import uuid4
@@ -48,6 +50,15 @@ class ChineseSubtitleConfidence:
     chinese_lines: int
 
 
+@dataclass
+class ProviderPerformanceStats:
+    search_hits: int = 0
+    search_misses: int = 0
+    download_successes: int = 0
+    download_failures: int = 0
+    last_error: str = ""
+
+
 class SubtitleService:
     _DIRECT_PROVIDER_NAMES = {"assrt", "subhd", "subhdtw"}
 
@@ -77,6 +88,10 @@ class SubtitleService:
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._lock = threading.RLock()
         self._cache: dict[str, CachedSubtitle] = {}
+        self._provider_stats_lock = threading.RLock()
+        self._provider_stats: dict[str, ProviderPerformanceStats] = {}
+        self._provider_stats_last_persist_monotonic = 0.0
+        self._load_provider_stats()
 
     def search(self, query: SearchRequest) -> SearchResponse:
         self._cleanup_cache()
@@ -84,7 +99,8 @@ class SubtitleService:
         results: list[SubtitleSearchItem] = []
         last_error: Exception | None = None
 
-        for stage_index, stage_providers in enumerate(self._settings.provider_stage_list):
+        for stage_index, configured_stage_providers in enumerate(self._settings.provider_stage_list):
+            stage_providers = self._rank_stage_providers(configured_stage_providers)
             stage_results, stage_error = self._search_stage_items(
                 query=query,
                 stage_index=stage_index,
@@ -95,11 +111,11 @@ class SubtitleService:
 
             stage_results = [item for item in stage_results if item.score >= self._settings.min_score]
             if stage_results:
-                stage_results.sort(key=lambda item: item.score, reverse=True)
+                stage_results = self._sort_stage_results_by_priority(stage_results)
                 results = stage_results
                 break
 
-        results.sort(key=lambda item: item.score, reverse=True)
+        results = self._sort_stage_results_by_priority(results)
         limit = min(query.limit, self._settings.max_results)
 
         active_providers = sorted({item.provider for item in results})
@@ -199,6 +215,7 @@ class SubtitleService:
                         stage_error = exc
 
         stage_results = self._dedupe_search_items(stage_results)
+        self._record_search_stage_stats(stage_providers=stage_providers, stage_results=stage_results)
         return stage_results, stage_error
 
     def _search_with_direct_providers(
@@ -316,6 +333,7 @@ class SubtitleService:
                 downloaded = self._chinese_provider.download(current_candidate, query=query)
             except Exception as exc:
                 last_error = exc
+                self._record_provider_download_failure(current_candidate.provider, exc)
                 if self._is_subhd_captcha_error(exc):
                     # Captcha in one subhd mirror usually means all subhd-family candidates
                     # are blocked for current session; skip and move to other providers/fallback.
@@ -324,14 +342,17 @@ class SubtitleService:
 
             if not downloaded.content:
                 last_error = SubtitleDownloadError("subtitle content is empty")
+                self._record_provider_download_failure(current_candidate.provider, last_error)
                 continue
 
             if requires_chinese:
                 is_verified, confidence = self._verify_chinese_content(downloaded.content)
                 if not is_verified:
                     last_error = SubtitleDownloadError(self._chinese_confidence_error(confidence))
+                    self._record_provider_download_failure(current_candidate.provider, last_error)
                     continue
 
+            self._record_provider_download_success(current_candidate.provider)
             return self._build_in_memory_direct(
                 token=token,
                 query=query,
@@ -384,7 +405,8 @@ class SubtitleService:
     ) -> InMemorySubtitle | None:
         provider_groups: list[tuple[int, list[str]]] = []
         for stage_index, stage in enumerate(self._settings.provider_stage_list):
-            subliminal_stage = [item for item in stage if item.lower() not in self._DIRECT_PROVIDER_NAMES]
+            ranked_stage = self._rank_stage_providers(stage)
+            subliminal_stage = [item for item in ranked_stage if item.lower() not in self._DIRECT_PROVIDER_NAMES]
             if subliminal_stage:
                 provider_groups.append((stage_index, subliminal_stage))
         download_error: Exception | None = None
@@ -493,7 +515,7 @@ class SubtitleService:
         last_search_error: Exception | None = None
 
         for stage_index in range(start_stage_index, len(stages)):
-            stage_providers = stages[stage_index]
+            stage_providers = self._rank_stage_providers(stages[stage_index])
             stage_items, stage_error = self._search_stage_items(
                 query=query,
                 stage_index=stage_index,
@@ -569,21 +591,26 @@ class SubtitleService:
         if not isinstance(candidate, DirectSubtitleCandidate):
             raise SubtitleDownloadError("invalid direct subtitle payload")
 
-        downloaded = self._chinese_provider.download(candidate, query=entry.query)
-        if not downloaded.content:
-            raise SubtitleDownloadError("subtitle content is empty")
-        if requires_chinese:
-            is_verified, confidence = self._verify_chinese_content(downloaded.content)
-            if not is_verified:
-                raise SubtitleDownloadError(self._chinese_confidence_error(confidence))
+        try:
+            downloaded = self._chinese_provider.download(candidate, query=entry.query)
+            if not downloaded.content:
+                raise SubtitleDownloadError("subtitle content is empty")
+            if requires_chinese:
+                is_verified, confidence = self._verify_chinese_content(downloaded.content)
+                if not is_verified:
+                    raise SubtitleDownloadError(self._chinese_confidence_error(confidence))
 
-        return self._build_in_memory_direct(
-            token=response_token,
-            query=entry.query,
-            candidate=candidate,
-            downloaded=downloaded,
-            filename=filename,
-        )
+            self._record_provider_download_success(candidate.provider)
+            return self._build_in_memory_direct(
+                token=response_token,
+                query=entry.query,
+                candidate=candidate,
+                downloaded=downloaded,
+                filename=filename,
+            )
+        except Exception as exc:
+            self._record_provider_download_failure(candidate.provider, exc)
+            raise
 
     def _fetch_subliminal_entry_once(
         self,
@@ -603,6 +630,7 @@ class SubtitleService:
                 provider_configs=self._settings.provider_configs,
             )
         except Exception as exc:
+            self._record_provider_download_failure(provider, exc)
             raise SubtitleDownloadError(f"subtitle download failed: {exc}") from exc
 
         content = getattr(subtitle, "content", None)
@@ -612,10 +640,12 @@ class SubtitleService:
                 content = str(text).encode("utf-8")
 
         if not content:
+            self._record_provider_download_failure(provider, "subtitle content is empty")
             raise SubtitleDownloadError("subtitle content is empty")
         if requires_chinese:
             is_verified, confidence = self._verify_chinese_content(content)
             if not is_verified:
+                self._record_provider_download_failure(provider, self._chinese_confidence_error(confidence))
                 raise SubtitleDownloadError(self._chinese_confidence_error(confidence))
 
         subtitle_id = self._subtitle_id(subtitle)
@@ -628,6 +658,7 @@ class SubtitleService:
             subtitle_format=subtitle_format,
         )
 
+        self._record_provider_download_success(provider)
         return InMemorySubtitle(
             token=response_token,
             subtitle_id=subtitle_id,
@@ -801,6 +832,184 @@ class SubtitleService:
             deduped.append(item)
         return deduped
 
+    def _sort_stage_results_by_priority(self, items: list[SubtitleSearchItem]) -> list[SubtitleSearchItem]:
+        if not items:
+            return items
+
+        return sorted(
+            items,
+            key=lambda item: (
+                self._provider_priority_bucket(item.provider),
+                -self._provider_download_successes(item.provider),
+                self._provider_download_failures(item.provider),
+                -int(item.score),
+            ),
+        )
+
+    def _rank_stage_providers(self, stage_providers: list[str]) -> list[str]:
+        if not stage_providers:
+            return []
+        if not self._settings.enable_adaptive_provider_priority:
+            return list(stage_providers)
+
+        indexed = list(enumerate(stage_providers))
+        indexed.sort(
+            key=lambda pair: (
+                self._provider_priority_bucket(pair[1]),
+                -self._provider_download_successes(pair[1]),
+                self._provider_download_failures(pair[1]),
+                -self._provider_search_hits(pair[1]),
+                pair[0],
+            )
+        )
+        return [provider for _, provider in indexed]
+
+    def _record_search_stage_stats(self, *, stage_providers: list[str], stage_results: list[SubtitleSearchItem]) -> None:
+        if not self._settings.enable_adaptive_provider_priority:
+            return
+
+        hit_providers = {str(item.provider or "").strip().lower() for item in stage_results if item.provider}
+        if not stage_providers:
+            return
+
+        with self._provider_stats_lock:
+            for provider in stage_providers:
+                key = self._normalize_provider_name(provider)
+                stats = self._provider_stats.setdefault(key, ProviderPerformanceStats())
+                if key in hit_providers:
+                    stats.search_hits += 1
+                else:
+                    stats.search_misses += 1
+        self._maybe_persist_provider_stats()
+
+    def _record_provider_download_success(self, provider: str) -> None:
+        if not self._settings.enable_adaptive_provider_priority:
+            return
+        key = self._normalize_provider_name(provider)
+        if not key:
+            return
+        with self._provider_stats_lock:
+            stats = self._provider_stats.setdefault(key, ProviderPerformanceStats())
+            stats.download_successes += 1
+            stats.last_error = ""
+        self._maybe_persist_provider_stats()
+
+    def _record_provider_download_failure(self, provider: str, exc: Exception | str) -> None:
+        if not self._settings.enable_adaptive_provider_priority:
+            return
+        key = self._normalize_provider_name(provider)
+        if not key:
+            return
+        with self._provider_stats_lock:
+            stats = self._provider_stats.setdefault(key, ProviderPerformanceStats())
+            stats.download_failures += 1
+            stats.last_error = str(exc or "").strip()[:500]
+        self._maybe_persist_provider_stats()
+
+    def _provider_priority_bucket(self, provider: str) -> int:
+        key = self._normalize_provider_name(provider)
+        if not key:
+            return 3
+        with self._provider_stats_lock:
+            stats = self._provider_stats.get(key)
+        if not stats:
+            return 3
+        if stats.search_hits > 0 and stats.download_successes > 0:
+            return 0
+        if stats.search_hits > 0 and stats.download_failures > 0:
+            return 1
+        if stats.search_hits > 0:
+            return 2
+        return 3
+
+    def _provider_download_successes(self, provider: str) -> int:
+        key = self._normalize_provider_name(provider)
+        if not key:
+            return 0
+        with self._provider_stats_lock:
+            stats = self._provider_stats.get(key)
+        return int(stats.download_successes) if stats else 0
+
+    def _provider_download_failures(self, provider: str) -> int:
+        key = self._normalize_provider_name(provider)
+        if not key:
+            return 0
+        with self._provider_stats_lock:
+            stats = self._provider_stats.get(key)
+        return int(stats.download_failures) if stats else 0
+
+    def _provider_search_hits(self, provider: str) -> int:
+        key = self._normalize_provider_name(provider)
+        if not key:
+            return 0
+        with self._provider_stats_lock:
+            stats = self._provider_stats.get(key)
+        return int(stats.search_hits) if stats else 0
+
+    @staticmethod
+    def _normalize_provider_name(provider: str) -> str:
+        return str(provider or "").strip().lower()
+
+    def _load_provider_stats(self) -> None:
+        if not self._settings.enable_adaptive_provider_priority:
+            return
+        path = Path(self._settings.provider_priority_stats_file)
+        if not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+
+        loaded: dict[str, ProviderPerformanceStats] = {}
+        for provider, payload in raw.items():
+            key = self._normalize_provider_name(provider)
+            if not key or not isinstance(payload, dict):
+                continue
+            loaded[key] = ProviderPerformanceStats(
+                search_hits=max(int(payload.get("search_hits", 0) or 0), 0),
+                search_misses=max(int(payload.get("search_misses", 0) or 0), 0),
+                download_successes=max(int(payload.get("download_successes", 0) or 0), 0),
+                download_failures=max(int(payload.get("download_failures", 0) or 0), 0),
+                last_error=str(payload.get("last_error", "") or "")[:500],
+            )
+
+        if loaded:
+            with self._provider_stats_lock:
+                self._provider_stats.update(loaded)
+
+    def _maybe_persist_provider_stats(self, *, force: bool = False) -> None:
+        if not self._settings.enable_adaptive_provider_priority:
+            return
+        path = Path(self._settings.provider_priority_stats_file)
+        interval = max(0, int(self._settings.provider_priority_persist_interval_seconds))
+        now = time.monotonic()
+        if not force and interval > 0 and (now - self._provider_stats_last_persist_monotonic) < interval:
+            return
+
+        with self._provider_stats_lock:
+            snapshot = {
+                provider: {
+                    "search_hits": stats.search_hits,
+                    "search_misses": stats.search_misses,
+                    "download_successes": stats.download_successes,
+                    "download_failures": stats.download_failures,
+                    "last_error": stats.last_error,
+                }
+                for provider, stats in self._provider_stats.items()
+            }
+            self._provider_stats_last_persist_monotonic = now
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+            tmp_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(path)
+        except Exception:
+            return
+
     def _entry_key(self, entry: CachedSubtitle) -> tuple[str, str] | None:
         if entry.kind == "direct" and isinstance(entry.payload, DirectSubtitleCandidate):
             return self._subtitle_item_key(entry.payload.provider, entry.payload.subtitle_id)
@@ -866,20 +1075,20 @@ class SubtitleService:
             return "subhd-family"
         return normalized or "unknown"
 
-    @classmethod
-    def _prioritize_direct_candidates(cls, candidates: list[DirectSubtitleCandidate]) -> list[DirectSubtitleCandidate]:
-        non_subhd: list[DirectSubtitleCandidate] = []
-        subhd_family: list[DirectSubtitleCandidate] = []
-        for item in candidates:
-            family = cls._direct_provider_family(item.provider)
-            if family == "subhd-family":
-                subhd_family.append(item)
-            else:
-                non_subhd.append(item)
+    def _prioritize_direct_candidates(self, candidates: list[DirectSubtitleCandidate]) -> list[DirectSubtitleCandidate]:
+        if not candidates:
+            return candidates
 
-        non_subhd.sort(key=lambda item: item.score, reverse=True)
-        subhd_family.sort(key=lambda item: item.score, reverse=True)
-        return non_subhd + subhd_family
+        return sorted(
+            candidates,
+            key=lambda item: (
+                self._provider_priority_bucket(item.provider),
+                1 if self._direct_provider_family(item.provider) == "subhd-family" else 0,
+                -self._provider_download_successes(item.provider),
+                self._provider_download_failures(item.provider),
+                -int(item.score),
+            ),
+        )
 
     @staticmethod
     def _is_subhd_captcha_error(exc: Exception) -> bool:

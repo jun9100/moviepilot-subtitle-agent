@@ -9,7 +9,7 @@ import pytest
 from app.config import Settings
 from app.errors import SubtitleDownloadError, SubtitleNotFoundError
 from app.models import SearchRequest, SubtitleSearchItem
-from app.service import CachedSubtitle, SubtitleService
+from app.service import CachedSubtitle, ProviderPerformanceStats, SubtitleService
 
 from .fakes import FakeChineseProvider, make_candidate
 
@@ -757,3 +757,72 @@ def test_is_subhd_captcha_error_supports_ajax_gzh_message(tmp_path):
     assert service._is_subhd_captcha_error(
         SubtitleDownloadError("subhd site verification required (/ajax/gzh) on subhd.tv")
     )
+
+
+def test_adaptive_provider_priority_ranks_downloadable_before_undownloadable(tmp_path):
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="subhd,assrt,podnapisi",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            token_ttl_seconds=3600,
+            enable_adaptive_provider_priority=True,
+            provider_priority_stats_file=tmp_path / "provider-priority.json",
+            provider_priority_persist_interval_seconds=0,
+        ),
+        backend=_FakeBackend(),
+        chinese_provider=FakeChineseProvider([]),
+    )
+
+    with service._provider_stats_lock:
+        service._provider_stats["assrt"] = ProviderPerformanceStats(
+            search_hits=6,
+            search_misses=1,
+            download_successes=4,
+            download_failures=1,
+        )
+        service._provider_stats["subhd"] = ProviderPerformanceStats(
+            search_hits=8,
+            search_misses=1,
+            download_successes=0,
+            download_failures=8,
+        )
+
+    ranked = service._rank_stage_providers(["subhd", "assrt", "podnapisi"])
+    assert ranked == ["assrt", "subhd", "podnapisi"]
+
+
+def test_adaptive_direct_candidate_priority_prefers_downloadable_provider(tmp_path):
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="subhd,assrt",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            token_ttl_seconds=3600,
+            enable_adaptive_provider_priority=True,
+            provider_priority_stats_file=tmp_path / "provider-priority.json",
+            provider_priority_persist_interval_seconds=0,
+        ),
+        backend=_FakeBackend(),
+        chinese_provider=FakeChineseProvider([]),
+    )
+
+    with service._provider_stats_lock:
+        service._provider_stats["assrt"] = ProviderPerformanceStats(
+            search_hits=10,
+            download_successes=5,
+            download_failures=1,
+        )
+        service._provider_stats["subhd"] = ProviderPerformanceStats(
+            search_hits=10,
+            download_successes=0,
+            download_failures=10,
+        )
+
+    prioritized = service._prioritize_direct_candidates(
+        [
+            make_candidate(subtitle_id="s-subhd", score=320, provider="subhd"),
+            make_candidate(subtitle_id="s-assrt", score=180, provider="assrt"),
+        ]
+    )
+    assert prioritized[0].provider == "assrt"

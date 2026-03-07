@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.2.12"
+    app_version: str = "0.2.13"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     min_score: int = 0
     enable_parallel_search: bool = True
     search_workers: int = 6
+    enable_adaptive_provider_priority: bool = True
+    provider_priority_stats_file: Path = Path("data/provider_priority_stats.json")
+    provider_priority_persist_interval_seconds: int = 30
     token_ttl_seconds: int = 1800
     request_timeout_seconds: int = 20
     user_agent: str = "MoviePilotSubtitleAgent/0.2"
@@ -87,6 +90,17 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 6
         return max(1, parsed)
+
+    @field_validator("provider_priority_persist_interval_seconds", mode="before")
+    @classmethod
+    def normalize_provider_priority_persist_interval_seconds(cls, value: Any) -> int:
+        if value is None:
+            return 30
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 30
+        return max(0, parsed)
 
     @field_validator("chinese_confidence_threshold", mode="before")
     @classmethod
