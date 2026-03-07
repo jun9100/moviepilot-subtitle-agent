@@ -38,6 +38,8 @@ class InMemorySubtitle:
 
 
 class SubtitleService:
+    _DIRECT_PROVIDER_NAMES = {"assrt", "subhd", "subhdtw"}
+
     def __init__(
         self,
         *,
@@ -51,6 +53,7 @@ class SubtitleService:
         self._chinese_provider = chinese_provider or ChineseSubtitleProvider(
             timeout_seconds=settings.request_timeout_seconds,
             user_agent=settings.user_agent,
+            allow_season_pack_for_episode=settings.allow_season_pack_for_episode,
         )
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._lock = threading.RLock()
@@ -60,12 +63,65 @@ class SubtitleService:
         self._cleanup_cache()
 
         results: list[SubtitleSearchItem] = []
+        last_error: Exception | None = None
 
+        for stage_providers in self._settings.provider_stage_list:
+            stage_results: list[SubtitleSearchItem] = []
+
+            direct_providers = [item for item in stage_providers if item.lower() in self._DIRECT_PROVIDER_NAMES]
+            subliminal_providers = [item for item in stage_providers if item.lower() not in self._DIRECT_PROVIDER_NAMES]
+
+            if direct_providers:
+                try:
+                    stage_results.extend(self._search_with_direct_providers(query=query, providers=direct_providers))
+                except Exception as exc:
+                    last_error = exc
+
+            if subliminal_providers:
+                try:
+                    stage_results.extend(
+                        self._search_with_subliminal_providers(query=query, providers=subliminal_providers)
+                    )
+                except Exception as exc:
+                    last_error = exc
+
+            stage_results = [item for item in stage_results if item.score >= self._settings.min_score]
+            if stage_results:
+                stage_results.sort(key=lambda item: item.score, reverse=True)
+                results = stage_results
+                break
+
+        results.sort(key=lambda item: item.score, reverse=True)
+        limit = min(query.limit, self._settings.max_results)
+
+        active_providers = sorted({item.provider for item in results})
+        if not active_providers:
+            configured = self._settings.provider_list
+            if configured:
+                active_providers = configured
+
+        if not results and last_error and not active_providers:
+            raise SubtitleSearchError(f"subtitle search failed: {last_error}") from last_error
+
+        return SearchResponse(
+            query=query,
+            providers=active_providers,
+            total=len(results),
+            items=results[:limit],
+        )
+
+    def _search_with_direct_providers(
+        self,
+        *,
+        query: SearchRequest,
+        providers: list[str],
+    ) -> list[SubtitleSearchItem]:
         try:
-            direct_candidates = self._chinese_provider.search(query, providers=self._settings.provider_list)
+            direct_candidates = self._chinese_provider.search(query, providers=providers)
         except Exception as exc:
             raise SubtitleSearchError(f"chinese subtitle search failed: {exc}") from exc
 
+        items: list[SubtitleSearchItem] = []
         for candidate in direct_candidates:
             token = uuid4().hex
             with self._lock:
@@ -76,7 +132,7 @@ class SubtitleService:
                     created_at=self._now_fn(),
                 )
 
-            results.append(
+            items.append(
                 SubtitleSearchItem(
                     token=token,
                     provider=candidate.provider,
@@ -91,40 +147,7 @@ class SubtitleService:
                     download_url=f"/api/v1/subtitles/fetch/{token}",
                 )
             )
-
-        if not results and self._settings.enable_subliminal_fallback:
-            non_opensubtitles_providers = self._settings.non_opensubtitles_fallback_provider_list
-            if non_opensubtitles_providers:
-                results.extend(
-                    self._search_with_subliminal_providers(
-                        query=query,
-                        providers=non_opensubtitles_providers,
-                    )
-                )
-
-        if not results and self._settings.enable_subliminal_fallback:
-            opensubtitles_providers = self._settings.opensubtitles_fallback_provider_list
-            if opensubtitles_providers:
-                results.extend(
-                    self._search_with_subliminal_providers(
-                        query=query,
-                        providers=opensubtitles_providers,
-                    )
-                )
-
-        results.sort(key=lambda item: item.score, reverse=True)
-        limit = min(query.limit, self._settings.max_results)
-
-        active_providers = sorted({item.provider for item in results})
-        if not active_providers:
-            active_providers = self._settings.provider_list
-
-        return SearchResponse(
-            query=query,
-            providers=active_providers,
-            total=len(results),
-            items=results[:limit],
-        )
+        return items
 
     def download_to_disk(self, token: str, filename: str | None = None) -> DownloadResponse:
         payload = self.fetch_to_memory(token, filename=filename)
@@ -244,10 +267,11 @@ class SubtitleService:
         filename: str | None,
         requires_chinese: bool,
     ) -> InMemorySubtitle | None:
-        provider_groups = [
-            self._settings.non_opensubtitles_fallback_provider_list,
-            self._settings.opensubtitles_fallback_provider_list,
-        ]
+        provider_groups: list[list[str]] = []
+        for stage in self._settings.provider_stage_list:
+            subliminal_stage = [item for item in stage if item.lower() not in self._DIRECT_PROVIDER_NAMES]
+            if subliminal_stage:
+                provider_groups.append(subliminal_stage)
         download_error: Exception | None = None
         search_error: Exception | None = None
 
@@ -261,6 +285,7 @@ class SubtitleService:
                 search_error = exc
                 continue
 
+            items = [item for item in items if item.score >= self._settings.min_score]
             items.sort(key=lambda item: item.score, reverse=True)
             for item in items:
                 try:

@@ -281,6 +281,59 @@ def test_search_stops_before_opensubtitles_when_secondary_has_results(tmp_path):
     assert calls == [["podnapisi", "tvsubtitles"]]
 
 
+def test_search_respects_custom_provider_stage_order(tmp_path):
+    provider = FakeChineseProvider([make_candidate(subtitle_id="s-direct", score=300)])
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="assrt,subhd,subhdtw",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            enable_subliminal_fallback=True,
+            provider_stage_order="opensubtitlescom,opensubtitles|assrt,subhd,subhdtw",
+            min_score=0,
+        ),
+        chinese_provider=provider,
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_search_with_subliminal(self, *, query, providers):
+        calls.append(list(providers))
+        return [
+            SubtitleSearchItem(
+                token="t-open",
+                provider="opensubtitlescom",
+                subtitle_id="open-1",
+                title=query.title,
+                language="zh",
+                score=88,
+                matches=[],
+                hearing_impaired=None,
+                page_link=None,
+                subtitle_format="srt",
+                download_url="/api/v1/subtitles/fetch/t-open",
+            )
+        ]
+
+    service._search_with_subliminal_providers = types.MethodType(fake_search_with_subliminal, service)
+
+    result = service.search(
+        SearchRequest(
+            title="短剧开始啦",
+            media_type="tv",
+            season=1,
+            episode=3,
+            languages=["zh-cn", "zh-tw"],
+            limit=5,
+        )
+    )
+
+    assert result.total == 1
+    assert result.items[0].provider == "opensubtitlescom"
+    assert calls == [["opensubtitlescom", "opensubtitles"]]
+    assert provider.search_calls == 0
+
+
 def test_download_uses_subliminal_fallback_when_direct_candidates_fail(tmp_path):
     provider = FakeChineseProvider(
         [make_candidate(subtitle_id="s-direct", score=88)],

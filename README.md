@@ -8,7 +8,7 @@
 
 - 默认只关注中文字幕（`zh-cn` / `zh-tw`）。
 - 优先使用中文源（`assrt` + `subhd` + `subhdtw`，均支持检索与下载）。
-- 多源分层检索：`assrt/subhd/subhdtw` → `podnapisi/tvsubtitles` → `opensubtitles`。
+- 多源分层检索：`assrt/subhd/subhdtw` → `podnapisi/tvsubtitles` → `opensubtitles`（可配置，不写死）。
 - OpenSubtitles 仅作为最后兜底。
 
 ## 主要功能
@@ -65,6 +65,26 @@ environment:
 
 说明：只有 `HTTP_PROXY` 不够，`https://` 请求需要 `HTTPS_PROXY`。
 
+## 检索顺序与精度（可配置）
+
+### 1) 自定义检索分层顺序
+
+环境变量：`PROVIDER_STAGE_ORDER`
+
+- 语法：每一层用 `|` 分隔，层内 provider 用 `,` 分隔。
+- 示例（OpenSubtitles 优先）：
+
+```env
+PROVIDER_STAGE_ORDER=opensubtitlescom,opensubtitles|assrt,subhd,subhdtw|podnapisi,tvsubtitles
+```
+
+### 2) 错剧/错集控制
+
+- `MIN_SCORE`：最低候选分数（默认 `0`），可提高到 `60`~`120` 过滤低质量匹配。
+- `ALLOW_SEASON_PACK_FOR_EPISODE`：
+  - `true`（默认）：允许整季包用于单集请求（命中率更高）。
+  - `false`：仅接受更严格的单集匹配（准确率更高）。
+
 ## 标准 API
 
 - `POST /api/v1/subtitles/search`
@@ -98,6 +118,7 @@ environment:
 
 ## 更新记录（近期）
 
+- `v0.2.0`：新增 `PROVIDER_STAGE_ORDER`、`MIN_SCORE`、`ALLOW_SEASON_PACK_FOR_EPISODE`，支持按用户偏好调整源优先级与匹配严格度（不再写死顺序）。
 - `v0.1.9`：新增 `subhdtw` 直连源，并为 `subhd/subhdtw` 下载加入多镜像轮询重试（`subhd.tv/subhdtw.com/subhd.cc/subhd.me`）。
 - `v0.1.8`：当 `assrt/subhd` 直连下载失败（含 `subhd` 验证码拦截）时，自动继续使用 fallback 下载链路（`podnapisi/tvsubtitles/opensubtitles`）。
 - `v0.1.7`：`subhd` 升级为真实下载源（不再仅作提示词扩展），可直接下载并参与候选排序。

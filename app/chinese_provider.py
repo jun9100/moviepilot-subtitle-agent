@@ -53,8 +53,15 @@ class ChineseSubtitleProvider:
     - assrt: search + download
     """
 
-    def __init__(self, *, timeout_seconds: int = 20, user_agent: str = "MoviePilotSubtitleAgent/0.2") -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: int = 20,
+        user_agent: str = "MoviePilotSubtitleAgent/0.2",
+        allow_season_pack_for_episode: bool = True,
+    ) -> None:
         self._timeout = timeout_seconds
+        self._allow_season_pack_for_episode = allow_season_pack_for_episode
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -642,7 +649,10 @@ class ChineseSubtitleProvider:
                         episode is None
                         and not episode_range
                         and episode_upper_bound is None
-                        and not self._looks_like_season_pack(candidate, query=query)
+                        and not (
+                            self._allow_season_pack_for_episode
+                            and self._looks_like_season_pack(candidate, query=query)
+                        )
                     ):
                         # Episodic requests should avoid ambiguous single-file subtitles.
                         return False
@@ -863,7 +873,7 @@ class ChineseSubtitleProvider:
                     score += 28
                 else:
                     score -= 120
-            elif self._looks_like_season_pack(candidate, query=query):
+            elif self._allow_season_pack_for_episode and self._looks_like_season_pack(candidate, query=query):
                 score += 15
             else:
                 score -= 50

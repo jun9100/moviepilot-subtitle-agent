@@ -15,23 +15,29 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.1.9"
+    app_version: str = "0.2.0"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
 
     default_languages: str = "zh-cn,zh-tw"
     default_providers: str = "assrt,subhd,subhdtw"
+    # Optional custom stage order, split by "|", each stage split by ",".
+    # Example:
+    # opensubtitlescom,opensubtitles|assrt,subhd,subhdtw|podnapisi,tvsubtitles
+    provider_stage_order: str = ""
     enable_subliminal_fallback: bool = True
     # Fallback source chain:
     # 1) non-opensubtitles providers
     # 2) opensubtitles providers (last resort)
     subliminal_fallback_providers: str = "podnapisi,tvsubtitles,opensubtitlescom,opensubtitles"
     max_results: int = 30
+    min_score: int = 0
     token_ttl_seconds: int = 1800
     request_timeout_seconds: int = 20
     user_agent: str = "MoviePilotSubtitleAgent/0.2"
     subtitle_output_dir: Path = Path("data/subtitles")
+    allow_season_pack_for_episode: bool = True
 
     addic7ed_username: str | None = None
     addic7ed_password: str | None = None
@@ -73,6 +79,30 @@ class Settings(BaseSettings):
     @property
     def language_list(self) -> list[str]:
         return [item.strip() for item in self.default_languages.split(",") if item.strip()]
+
+    @property
+    def provider_stage_list(self) -> list[list[str]]:
+        if self.provider_stage_order.strip():
+            parsed: list[list[str]] = []
+            for stage in self.provider_stage_order.split("|"):
+                providers = [item.strip() for item in stage.split(",") if item.strip()]
+                if providers:
+                    parsed.append(providers)
+            if parsed:
+                return parsed
+
+        stages: list[list[str]] = []
+        if self.provider_list:
+            stages.append(self.provider_list)
+
+        if self.enable_subliminal_fallback:
+            non_open = self.non_opensubtitles_fallback_provider_list
+            if non_open:
+                stages.append(non_open)
+            opensubtitles = self.opensubtitles_fallback_provider_list
+            if opensubtitles:
+                stages.append(opensubtitles)
+        return stages
 
     @property
     def provider_configs(self) -> dict[str, dict[str, object]]:
