@@ -7,8 +7,8 @@
 很多用户在 Plex/Infuse + OpenSubtitles 场景下，仍然会遇到“缺少中文字幕”。本服务的默认策略是：
 
 - 默认只关注中文字幕（`zh-cn` / `zh-tw`）。
-- 优先使用中文源（`assrt` + `subhd`，均支持检索与下载）。
-- 多源分层检索：`assrt/subhd` → `podnapisi/tvsubtitles` → `opensubtitles`。
+- 优先使用中文源（`assrt` + `subhd` + `subhdtw`，均支持检索与下载）。
+- 多源分层检索：`assrt/subhd/subhdtw` → `podnapisi/tvsubtitles` → `opensubtitles`。
 - OpenSubtitles 仅作为最后兜底。
 
 ## 主要功能
@@ -98,6 +98,7 @@ environment:
 
 ## 更新记录（近期）
 
+- `v0.1.9`：新增 `subhdtw` 直连源，并为 `subhd/subhdtw` 下载加入多镜像轮询重试（`subhd.tv/subhdtw.com/subhd.cc/subhd.me`）。
 - `v0.1.8`：当 `assrt/subhd` 直连下载失败（含 `subhd` 验证码拦截）时，自动继续使用 fallback 下载链路（`podnapisi/tvsubtitles/opensubtitles`）。
 - `v0.1.7`：`subhd` 升级为真实下载源（不再仅作提示词扩展），可直接下载并参与候选排序。
 - `v0.1.6`：修复 `assrt` 网络/SSL 异常导致整次搜索失败的问题，失败时自动继续后续源与 fallback。

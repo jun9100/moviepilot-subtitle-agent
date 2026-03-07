@@ -18,6 +18,7 @@ from .models import SearchRequest
 
 CHINESE_LANG_CODES = {"zh", "zh-cn", "zh-hans", "zh-tw", "zh-hant", "chs", "cht", "chi", "zho"}
 SUBTITLE_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
+SUBHD_MIRRORS = ("subhd.tv", "subhdtw.com", "subhd.cc", "subhd.me")
 
 
 @dataclass
@@ -48,7 +49,7 @@ class ChineseSubtitleProvider:
     Chinese subtitle provider chain used to补齐 OpenSubtitles 缺失场景。
 
     Current strategy:
-    - subhd: search + download
+    - subhd/subhdtw: search + download (with mirror retries)
     - assrt: search + download
     """
 
@@ -65,7 +66,8 @@ class ChineseSubtitleProvider:
 
     def search(self, query: SearchRequest, *, providers: list[str]) -> list[DirectSubtitleCandidate]:
         normalized_providers = {item.strip().lower() for item in providers if item.strip()}
-        keywords = self._build_keywords(query, use_subhd=("subhd" in normalized_providers))
+        use_subhd_hints = bool({"subhd", "subhdtw"} & normalized_providers)
+        keywords = self._build_keywords(query, use_subhd=use_subhd_hints)
 
         all_candidates: list[DirectSubtitleCandidate] = []
 
@@ -73,6 +75,13 @@ class ChineseSubtitleProvider:
             for keyword in keywords:
                 try:
                     all_candidates.extend(self._search_subhd(keyword))
+                except Exception:
+                    continue
+
+        if "subhdtw" in normalized_providers:
+            for keyword in keywords:
+                try:
+                    all_candidates.extend(self._search_subhdtw(keyword))
                 except Exception:
                     continue
 
@@ -96,7 +105,7 @@ class ChineseSubtitleProvider:
         return filtered
 
     def download(self, candidate: DirectSubtitleCandidate, *, query: SearchRequest) -> DownloadedSubtitle:
-        if candidate.provider == "subhd":
+        if candidate.provider in {"subhd", "subhdtw"}:
             return self._download_subhd(candidate, query=query)
 
         if not candidate.download_url:
@@ -128,27 +137,82 @@ class ChineseSubtitleProvider:
             sid = self._extract_subhd_id(candidate.page_link or candidate.download_url)
         if not sid or sid == "unknown":
             raise SubtitleDownloadError("subhd candidate does not include a valid subtitle id")
+        domains = self._subhd_domain_order(candidate)
+        last_error: Exception | None = None
+        captcha_encountered = False
 
-        detail_url = f"https://subhd.tv/a/{sid}"
-        down_page_url = f"https://subhd.tv/down/{sid}"
+        for _ in range(2):
+            for domain in domains:
+                try:
+                    return self._download_subhd_from_domain(
+                        domain=domain,
+                        sid=sid,
+                        candidate=candidate,
+                        query=query,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    if "captcha" in str(exc).lower():
+                        captcha_encountered = True
+                    continue
+
+        if captcha_encountered:
+            raise SubtitleDownloadError("subhd mirrors require captcha verification, cannot auto-download")
+        if last_error:
+            raise SubtitleDownloadError(f"subhd download failed on all mirrors: {last_error}") from last_error
+        raise SubtitleDownloadError("subhd download failed on all mirrors")
+
+    def _download_subhd_from_domain(
+        self,
+        *,
+        domain: str,
+        sid: str,
+        candidate: DirectSubtitleCandidate,
+        query: SearchRequest,
+    ) -> DownloadedSubtitle:
+        base_url = f"https://{domain}"
+        detail_url = f"{base_url}/a/{sid}"
+        down_page_url = f"{base_url}/down/{sid}"
 
         request_headers = {
             "User-Agent": self._session.headers.get("User-Agent", "MoviePilotSubtitleAgent/0.2"),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Referer": detail_url,
-            "Origin": "https://subhd.tv",
+            "Origin": base_url,
         }
 
         try:
             # Prime cookies/token required by subhd download API.
             self._session.get(detail_url, timeout=self._timeout, allow_redirects=True)
-            self._session.get(down_page_url, timeout=self._timeout, allow_redirects=True, headers=request_headers)
+            down_response = self._session.get(
+                down_page_url,
+                timeout=self._timeout,
+                allow_redirects=True,
+                headers=request_headers,
+            )
         except Exception as exc:
-            raise SubtitleDownloadError(f"subhd preflight request failed: {exc}") from exc
+            raise SubtitleDownloadError(f"subhd preflight request failed ({domain}): {exc}") from exc
+
+        # Cloudflare anti-bot preflight link.
+        try:
+            down_soup = BeautifulSoup(down_response.text, "html.parser")
+            cf_link = down_soup.select_one("a[href*='/cdn-cgi/content?id=']")
+            if cf_link:
+                href = str(cf_link.get("href") or "").strip()
+                if href:
+                    content_url = href if href.startswith("http") else urljoin(base_url, href)
+                    self._session.get(
+                        content_url,
+                        timeout=self._timeout,
+                        allow_redirects=True,
+                        headers={**request_headers, "Referer": down_page_url},
+                    )
+        except Exception:
+            pass
 
         try:
             api_response = self._session.post(
-                "https://subhd.tv/api/sub/down",
+                f"{base_url}/api/sub/down",
                 json={"sid": sid, "cap": ""},
                 timeout=self._timeout,
                 headers={
@@ -159,18 +223,18 @@ class ChineseSubtitleProvider:
                 },
             )
         except Exception as exc:
-            raise SubtitleDownloadError(f"subhd download api request failed: {exc}") from exc
+            raise SubtitleDownloadError(f"subhd download api request failed ({domain}): {exc}") from exc
 
         if api_response.status_code != 200:
-            raise SubtitleDownloadError(f"subhd download api failed with status {api_response.status_code}")
+            raise SubtitleDownloadError(f"subhd download api failed ({domain}) with status {api_response.status_code}")
 
         try:
             payload = api_response.json()
         except Exception as exc:
-            raise SubtitleDownloadError(f"subhd download api returned invalid json: {exc}") from exc
+            raise SubtitleDownloadError(f"subhd download api returned invalid json ({domain}): {exc}") from exc
 
         if payload.get("pass") is False:
-            raise SubtitleDownloadError("subhd requires captcha verification, cannot auto-download")
+            raise SubtitleDownloadError(f"subhd captcha required on {domain}")
         if payload.get("success") is not True:
             message = str(payload.get("msg") or "subhd download api failed")
             raise SubtitleDownloadError(message)
@@ -178,6 +242,8 @@ class ChineseSubtitleProvider:
         final_url = str(payload.get("url") or "").strip()
         if not final_url:
             raise SubtitleDownloadError("subhd download api did not return file url")
+        if final_url.startswith("/"):
+            final_url = urljoin(base_url, final_url)
 
         try:
             file_response = self._session.get(
@@ -187,10 +253,10 @@ class ChineseSubtitleProvider:
                 headers={"Referer": down_page_url},
             )
         except Exception as exc:
-            raise SubtitleDownloadError(f"subhd file request failed: {exc}") from exc
+            raise SubtitleDownloadError(f"subhd file request failed ({domain}): {exc}") from exc
 
         if file_response.status_code != 200:
-            raise SubtitleDownloadError(f"subhd file request failed with status {file_response.status_code}")
+            raise SubtitleDownloadError(f"subhd file request failed ({domain}) with status {file_response.status_code}")
         if not file_response.content:
             raise SubtitleDownloadError("subhd downloaded content is empty")
 
@@ -201,6 +267,26 @@ class ChineseSubtitleProvider:
             source_url=final_url,
             content_disposition=file_response.headers.get("Content-Disposition"),
         )
+
+    def _subhd_domain_order(self, candidate: DirectSubtitleCandidate) -> list[str]:
+        domains = list(SUBHD_MIRRORS)
+
+        preferred = "subhdtw.com" if candidate.provider == "subhdtw" else "subhd.tv"
+        if preferred in domains:
+            domains.remove(preferred)
+            domains.insert(0, preferred)
+
+        for raw in (candidate.page_link or "", candidate.download_url or ""):
+            try:
+                host = (urlparse(raw).hostname or "").lower()
+            except Exception:
+                host = ""
+            if host in domains:
+                domains.remove(host)
+                domains.insert(0, host)
+                break
+
+        return domains
 
     def _build_downloaded_subtitle(
         self,
@@ -296,8 +382,14 @@ class ChineseSubtitleProvider:
         return hints
 
     def _search_subhd(self, keyword: str) -> list[DirectSubtitleCandidate]:
+        return self._search_subhd_site(keyword, base_url="https://subhd.tv", provider_name="subhd")
+
+    def _search_subhdtw(self, keyword: str) -> list[DirectSubtitleCandidate]:
+        return self._search_subhd_site(keyword, base_url="https://subhdtw.com", provider_name="subhdtw")
+
+    def _search_subhd_site(self, keyword: str, *, base_url: str, provider_name: str) -> list[DirectSubtitleCandidate]:
         encoded = quote(keyword)
-        url = f"https://subhd.tv/search/{encoded}"
+        url = f"{base_url}/search/{encoded}"
         response = self._session.get(url, timeout=self._timeout)
         if response.status_code != 200:
             return []
@@ -333,7 +425,7 @@ class ChineseSubtitleProvider:
 
             results.append(
                 DirectSubtitleCandidate(
-                    provider="subhd",
+                    provider=provider_name,
                     subtitle_id=subtitle_id,
                     title=title,
                     release_name=release_name,
@@ -648,7 +740,7 @@ class ChineseSubtitleProvider:
             return False
 
         ext = Path(urlparse(candidate.download_url).path).suffix.lower()
-        if ext not in {".zip", ".rar"} and candidate.provider != "subhd":
+        if ext not in {".zip", ".rar"} and candidate.provider not in {"subhd", "subhdtw"}:
             return False
 
         episode = ChineseSubtitleProvider._extract_episode_from_text(merged)
@@ -717,7 +809,7 @@ class ChineseSubtitleProvider:
 
         if candidate.provider == "assrt":
             score += 30
-        elif candidate.provider == "subhd":
+        elif candidate.provider in {"subhd", "subhdtw"}:
             score += 24
 
         if "zh-cn" in candidate.language_tags:
@@ -786,7 +878,15 @@ class ChineseSubtitleProvider:
         seen: set[tuple[str, str, str]] = set()
         deduped: list[DirectSubtitleCandidate] = []
         for item in candidates:
-            key = (item.provider, item.subtitle_id, item.download_url)
+            provider_key = item.provider
+            subtitle_id_key = item.subtitle_id
+            url_key = item.download_url
+
+            if item.provider in {"subhd", "subhdtw"}:
+                provider_key = "subhd-family"
+                url_key = ""
+
+            key = (provider_key, subtitle_id_key, url_key)
             if key in seen:
                 continue
             seen.add(key)

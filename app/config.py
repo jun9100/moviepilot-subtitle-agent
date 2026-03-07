@@ -15,13 +15,13 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.1.8"
+    app_version: str = "0.1.9"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
 
     default_languages: str = "zh-cn,zh-tw"
-    default_providers: str = "assrt,subhd"
+    default_providers: str = "assrt,subhd,subhdtw"
     enable_subliminal_fallback: bool = True
     # Fallback source chain:
     # 1) non-opensubtitles providers

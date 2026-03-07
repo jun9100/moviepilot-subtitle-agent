@@ -152,6 +152,34 @@ def test_subhd_season_level_candidate_can_be_used_for_episode_query():
     assert _provider()._candidate_matches_query(candidate, subhd_query) is True
 
 
+def test_subhdtw_season_level_candidate_can_be_used_for_episode_query():
+    candidate = DirectSubtitleCandidate(
+        provider="subhdtw",
+        subtitle_id="aCQ07t",
+        title="短剧开始啦",
+        release_name="Life's Punchline.S01.WEB-DL.KKTV",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhdtw.com/down/aCQ07t",
+        page_link="https://subhdtw.com/a/aCQ07t",
+        language_tags=["zh-cn", "zh-tw"],
+        matches=[],
+        score=0,
+    )
+
+    subhd_query = SearchRequest(
+        title="短剧开始啦",
+        media_type="tv",
+        year=2021,
+        season=1,
+        episode=3,
+        languages=["zh-cn", "zh-tw"],
+        limit=10,
+    )
+
+    assert _provider()._candidate_matches_query(candidate, subhd_query) is True
+
+
 def test_search_ignores_assrt_errors_and_returns_empty(monkeypatch):
     provider = _provider()
 
