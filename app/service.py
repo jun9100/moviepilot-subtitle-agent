@@ -886,7 +886,14 @@ class SubtitleService:
         text = str(exc or "").strip().lower()
         if not text:
             return False
-        return "captcha" in text and "subhd" in text
+        if "subhd" not in text:
+            return False
+        return (
+            "captcha" in text
+            or "site verification" in text
+            or "/ajax/gzh" in text
+            or "验证" in text
+        )
 
     @staticmethod
     def _requires_chinese_subtitle(requested_languages: list[str]) -> bool:

@@ -194,7 +194,9 @@ class ChineseSubtitleProvider:
             raise SubtitleDownloadError("subhd candidate does not include a valid subtitle id")
         domains = [domain for domain in self._subhd_domain_order(candidate) if not self._is_subhd_domain_in_cooldown(domain)]
         if not domains:
-            raise SubtitleDownloadError("subhd mirrors in captcha cooldown, cannot auto-download now")
+            raise SubtitleDownloadError(
+                "subhd mirrors in verification cooldown (/ajax/gzh or captcha), cannot auto-download now"
+            )
 
         last_error: Exception | None = None
         captcha_encountered = False
@@ -235,7 +237,9 @@ class ChineseSubtitleProvider:
                         )
                     except Exception as exc:
                         last_error = exc
-            raise SubtitleDownloadError("subhd mirrors require captcha verification, cannot auto-download")
+            raise SubtitleDownloadError(
+                "subhd requires site verification (/ajax/gzh), captcha challenge blocks auto-download"
+            )
         if last_error:
             raise SubtitleDownloadError(f"subhd download failed on all mirrors: {last_error}") from last_error
         raise SubtitleDownloadError("subhd download failed on all mirrors")
@@ -271,6 +275,8 @@ class ChineseSubtitleProvider:
         except Exception as exc:
             raise SubtitleDownloadError(f"subhd preflight request failed ({domain}): {exc}") from exc
 
+        if self._is_subhd_site_verification_page(down_response.text):
+            raise SubtitleDownloadError(f"subhd site verification required (/ajax/gzh) on {domain}")
         if self._looks_like_captcha_page(down_response.text):
             raise SubtitleDownloadError(f"subhd captcha required on {domain}")
 
@@ -315,7 +321,7 @@ class ChineseSubtitleProvider:
             raise SubtitleDownloadError(f"subhd download api returned invalid json ({domain}): {exc}") from exc
 
         if payload.get("pass") is False:
-            raise SubtitleDownloadError(f"subhd captcha required on {domain}")
+            raise SubtitleDownloadError(f"subhd site verification required (/ajax/gzh) on {domain}")
         if payload.get("success") is not True:
             message = str(payload.get("msg") or "subhd download api failed")
             raise SubtitleDownloadError(message)
@@ -513,6 +519,11 @@ class ChineseSubtitleProvider:
     def _looks_like_captcha_page(html: str) -> bool:
         text = str(html or "").lower()
         return "captcha" in text or "验证码" in text or "g-recaptcha" in text or "/cdn-cgi/challenge" in text
+
+    @staticmethod
+    def _is_subhd_site_verification_page(html: str) -> bool:
+        text = str(html or "").lower()
+        return "/ajax/gzh" in text or "验证获取下载地址" in text or "验证中" in text
 
     def _build_downloaded_subtitle(
         self,

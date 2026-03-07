@@ -740,3 +740,20 @@ def test_download_error_mentions_fallback_attempts_when_exhausted(tmp_path):
     message = str(exc.value)
     assert "fallback providers attempted" in message
     assert "podnapisi,tvsubtitles,opensubtitlescom" in message
+
+
+def test_is_subhd_captcha_error_supports_ajax_gzh_message(tmp_path):
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="subhd",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            token_ttl_seconds=3600,
+        ),
+        backend=_FakeBackend(),
+        chinese_provider=FakeChineseProvider([]),
+    )
+
+    assert service._is_subhd_captcha_error(
+        SubtitleDownloadError("subhd site verification required (/ajax/gzh) on subhd.tv")
+    )

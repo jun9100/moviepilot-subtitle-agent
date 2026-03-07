@@ -323,3 +323,12 @@ def test_subhd_cookiecloud_auto_sync_to_mirrors(monkeypatch):
     for domain in SUBHD_MIRRORS:
         assert provider._session.cookies.get("cf_clearance", domain=domain) == "demo_token"
         assert provider._session.cookies.get("sessionid", domain=domain) == "abc123"
+
+
+def test_detect_subhd_site_verification_page():
+    html = """
+    <script>
+    $.ajax({type: "GET", url: "/ajax/gzh", success: function(data){ $(".btn-c").text("验证中"); }});
+    </script>
+    """
+    assert ChineseSubtitleProvider._is_subhd_site_verification_page(html) is True

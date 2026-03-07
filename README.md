@@ -143,6 +143,7 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 
 ## 更新记录（近期）
 
+- `v0.2.12`：细化 `subhd` 失败原因文案，明确提示“站点验证（/ajax/gzh）导致无法自动下载”，便于插件通知和用户手动处理。
 - `v0.2.11`：CookieCloud 配置改为通用命名 `COOKIECLOUD_*`（兼容旧的 `SUBHD_COOKIECLOUD_*`），避免误导为仅限 subhd。
 - `v0.2.10`：新增 CookieCloud 自动拉取 `subhd` Cookie（URL/KEY/PASSWORD 配置），支持定时同步并在验证码失败后强制刷新一次，减少手工维护 Cookie。
 - `v0.2.9`：参考 ChineseSubFinder/Bazarr 等项目的思路，新增 `subhd` 验证码冷却与 Cookie 注入能力（`SUBHD_CAPTCHA_COOLDOWN_SECONDS`、`SUBHD_COOKIE_STRING`、`SUBHD_COOKIE_FILE`），减少重复验证码失败。
