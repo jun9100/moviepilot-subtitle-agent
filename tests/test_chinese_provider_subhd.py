@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from app.chinese_provider import ChineseSubtitleProvider, DirectSubtitleCandidate, DownloadedSubtitle
+from app.chinese_provider import SUBHD_MIRRORS, ChineseSubtitleProvider, DirectSubtitleCandidate, DownloadedSubtitle
 from app.errors import SubtitleDownloadError
 from app.models import SearchRequest
 
@@ -239,3 +239,51 @@ def test_download_subhdtw_retries_mirrors(monkeypatch):
     assert downloaded.subtitle_format == "srt"
     assert calls[0] == "subhdtw.com"
     assert len(calls) >= 2
+
+
+def test_subhd_cookie_string_loaded_to_mirrors():
+    provider = ChineseSubtitleProvider(
+        timeout_seconds=5,
+        subhd_cookie_string="cf_clearance=demo_clearance; sessionid=abc123",
+    )
+
+    for domain in SUBHD_MIRRORS:
+        assert provider._session.cookies.get("cf_clearance", domain=domain) == "demo_clearance"
+        assert provider._session.cookies.get("sessionid", domain=domain) == "abc123"
+
+
+def test_subhd_captcha_cooldown_avoids_repeated_attempts(monkeypatch):
+    provider = ChineseSubtitleProvider(timeout_seconds=5, subhd_captcha_cooldown_seconds=60)
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="aCQ07t",
+        title="短剧开始啦",
+        release_name="Life's Punchline.S01.WEB-DL.KKTV",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/aCQ07t",
+        page_link="https://subhd.tv/a/aCQ07t",
+        language_tags=["zh-cn", "zh-tw"],
+        matches=[],
+        score=0,
+    )
+
+    calls: list[str] = []
+
+    def fake_download_from_domain(self, *, domain, sid, candidate, query):
+        calls.append(domain)
+        raise SubtitleDownloadError(f"subhd captcha required on {domain}")
+
+    provider._download_subhd_from_domain = types.MethodType(fake_download_from_domain, provider)
+
+    with pytest.raises(SubtitleDownloadError):
+        provider.download(candidate, query=_query())
+
+    first_attempt_calls = len(calls)
+    assert first_attempt_calls == len(SUBHD_MIRRORS)
+
+    with pytest.raises(SubtitleDownloadError):
+        provider.download(candidate, query=_query())
+
+    # second call should be blocked by cooldown before touching mirrors again
+    assert len(calls) == first_attempt_calls

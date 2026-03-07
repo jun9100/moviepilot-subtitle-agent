@@ -66,6 +66,9 @@ class SubtitleService:
             user_agent=settings.user_agent,
             allow_season_pack_for_episode=settings.allow_season_pack_for_episode,
             strict_media_type_filter=settings.strict_media_type_filter,
+            subhd_captcha_cooldown_seconds=settings.subhd_captcha_cooldown_seconds,
+            subhd_cookie_string=settings.subhd_cookie_string,
+            subhd_cookie_file=settings.subhd_cookie_file,
         )
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._lock = threading.RLock()

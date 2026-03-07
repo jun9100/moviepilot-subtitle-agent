@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass, field
+from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import quote, urljoin, urlparse
@@ -44,6 +47,7 @@ TITLE_NOISE_TOKENS = {
     "mkv",
     "mp4",
 }
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -85,10 +89,15 @@ class ChineseSubtitleProvider:
         user_agent: str = "MoviePilotSubtitleAgent/0.2",
         allow_season_pack_for_episode: bool = True,
         strict_media_type_filter: bool = True,
+        subhd_captcha_cooldown_seconds: int = 1800,
+        subhd_cookie_string: str | None = None,
+        subhd_cookie_file: str | None = None,
     ) -> None:
         self._timeout = timeout_seconds
         self._allow_season_pack_for_episode = allow_season_pack_for_episode
         self._strict_media_type_filter = strict_media_type_filter
+        self._subhd_captcha_cooldown_seconds = max(0, int(subhd_captcha_cooldown_seconds or 0))
+        self._subhd_domain_cooldown_until: dict[str, float] = {}
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -97,6 +106,7 @@ class ChineseSubtitleProvider:
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             }
         )
+        self._apply_subhd_cookies(cookie_string=subhd_cookie_string, cookie_file=subhd_cookie_file)
 
     def search(self, query: SearchRequest, *, providers: list[str]) -> list[DirectSubtitleCandidate]:
         normalized_providers = {item.strip().lower() for item in providers if item.strip()}
@@ -171,12 +181,19 @@ class ChineseSubtitleProvider:
             sid = self._extract_subhd_id(candidate.page_link or candidate.download_url)
         if not sid or sid == "unknown":
             raise SubtitleDownloadError("subhd candidate does not include a valid subtitle id")
-        domains = self._subhd_domain_order(candidate)
+        domains = [domain for domain in self._subhd_domain_order(candidate) if not self._is_subhd_domain_in_cooldown(domain)]
+        if not domains:
+            raise SubtitleDownloadError("subhd mirrors in captcha cooldown, cannot auto-download now")
+
         last_error: Exception | None = None
         captcha_encountered = False
 
         for _ in range(2):
+            attempted = False
             for domain in domains:
+                if self._is_subhd_domain_in_cooldown(domain):
+                    continue
+                attempted = True
                 try:
                     return self._download_subhd_from_domain(
                         domain=domain,
@@ -188,7 +205,10 @@ class ChineseSubtitleProvider:
                     last_error = exc
                     if "captcha" in str(exc).lower():
                         captcha_encountered = True
+                        self._mark_subhd_domain_cooldown(domain)
                     continue
+            if not attempted:
+                break
 
         if captcha_encountered:
             raise SubtitleDownloadError("subhd mirrors require captcha verification, cannot auto-download")
@@ -226,6 +246,9 @@ class ChineseSubtitleProvider:
             )
         except Exception as exc:
             raise SubtitleDownloadError(f"subhd preflight request failed ({domain}): {exc}") from exc
+
+        if self._looks_like_captcha_page(down_response.text):
+            raise SubtitleDownloadError(f"subhd captcha required on {domain}")
 
         # Cloudflare anti-bot preflight link.
         try:
@@ -321,6 +344,61 @@ class ChineseSubtitleProvider:
                 break
 
         return domains
+
+    def _apply_subhd_cookies(self, *, cookie_string: str | None, cookie_file: str | None) -> None:
+        loaded = 0
+
+        raw_cookie = str(cookie_string or "").strip()
+        if raw_cookie:
+            pairs = [item.strip() for item in raw_cookie.split(";") if "=" in item]
+            for pair in pairs:
+                name, value = pair.split("=", 1)
+                name = name.strip()
+                value = value.strip()
+                if not name:
+                    continue
+                for domain in SUBHD_MIRRORS:
+                    self._session.cookies.set(name, value, domain=domain, path="/")
+                    loaded += 1
+
+        path_text = str(cookie_file or "").strip()
+        if path_text:
+            cookie_path = Path(path_text)
+            if cookie_path.is_file():
+                try:
+                    jar = MozillaCookieJar(str(cookie_path))
+                    jar.load(ignore_discard=True, ignore_expires=True)
+                    for cookie in jar:
+                        domain = (cookie.domain or "").lstrip(".").lower()
+                        if domain in SUBHD_MIRRORS:
+                            self._session.cookies.set_cookie(cookie)
+                            loaded += 1
+                except Exception as exc:
+                    logger.warning("failed to load subhd cookie file %s: %s", cookie_path, exc)
+
+        if loaded:
+            logger.info("loaded %d subhd cookie entries", loaded)
+
+    def _mark_subhd_domain_cooldown(self, domain: str) -> None:
+        if self._subhd_captcha_cooldown_seconds <= 0:
+            return
+        self._subhd_domain_cooldown_until[domain] = time.monotonic() + self._subhd_captcha_cooldown_seconds
+
+    def _is_subhd_domain_in_cooldown(self, domain: str) -> bool:
+        if self._subhd_captcha_cooldown_seconds <= 0:
+            return False
+        until = self._subhd_domain_cooldown_until.get(domain)
+        if not until:
+            return False
+        if until <= time.monotonic():
+            self._subhd_domain_cooldown_until.pop(domain, None)
+            return False
+        return True
+
+    @staticmethod
+    def _looks_like_captcha_page(html: str) -> bool:
+        text = str(html or "").lower()
+        return "captcha" in text or "验证码" in text or "g-recaptcha" in text or "/cdn-cgi/challenge" in text
 
     def _build_downloaded_subtitle(
         self,

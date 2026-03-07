@@ -101,6 +101,12 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 - `ENABLE_PARALLEL_SEARCH`：是否启用同阶段 provider 并发检索（默认 `true`）。
 - `SEARCH_WORKERS`：并发线程数（默认 `6`）。
 
+### 5) subhd 验证码干扰缓解（可配置）
+
+- `SUBHD_CAPTCHA_COOLDOWN_SECONDS`：subhd 返回验证码后，镜像进入冷却时间（默认 `1800` 秒），避免反复触发验证码。
+- `SUBHD_COOKIE_STRING`：手动注入 Cookie 字符串（例如 `cf_clearance=...; session=...`），会自动应用到 `subhd.tv/subhdtw.com/subhd.cc/subhd.me`。
+- `SUBHD_COOKIE_FILE`：Netscape 格式 `cookies.txt` 路径（容器内路径），用于导入浏览器 Cookie。
+
 ## 标准 API
 
 - `POST /api/v1/subtitles/search`
@@ -134,6 +140,7 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 
 ## 更新记录（近期）
 
+- `v0.2.9`：参考 ChineseSubFinder/Bazarr 等项目的思路，新增 `subhd` 验证码冷却与 Cookie 注入能力（`SUBHD_CAPTCHA_COOLDOWN_SECONDS`、`SUBHD_COOKIE_STRING`、`SUBHD_COOKIE_FILE`），减少重复验证码失败。
 - `v0.2.8`：优化自动下载重试策略：优先尝试非 subhd 候选；一旦识别到 subhd 验证码拦截，自动跳过其余 subhd 镜像候选并更快进入其他来源/回退链路。
 - `v0.2.7`：进一步收紧剧集匹配规则：`tv` 查询新增标题重叠保护（弱季包候选需具备更可信标题相关性），降低“剧集格式正确但剧名不相关”的误命中。
 - `v0.2.6`：新增“字幕内容级中文置信度校验”（基于对话行占比与中英字符占比），并强化 `movie/tv` 媒体类型强约束，解决电影/剧集候选混入问题。

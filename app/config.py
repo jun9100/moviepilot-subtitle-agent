@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.2.8"
+    app_version: str = "0.2.9"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     enable_content_language_validation: bool = True
     chinese_confidence_threshold: float = 0.25
     chinese_confidence_min_chars: int = 4
+    subhd_captcha_cooldown_seconds: int = 1800
+    subhd_cookie_string: str | None = None
+    subhd_cookie_file: str | None = None
 
     addic7ed_username: str | None = None
     addic7ed_password: str | None = None
@@ -97,6 +100,17 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 4
         return max(1, parsed)
+
+    @field_validator("subhd_captcha_cooldown_seconds", mode="before")
+    @classmethod
+    def normalize_subhd_captcha_cooldown_seconds(cls, value: Any) -> int:
+        if value is None:
+            return 1800
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 1800
+        return max(0, parsed)
 
     @property
     def provider_list(self) -> list[str]:
