@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.2.10"
+    app_version: str = "0.2.11"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
@@ -48,10 +48,15 @@ class Settings(BaseSettings):
     subhd_captcha_cooldown_seconds: int = 1800
     subhd_cookie_string: str | None = None
     subhd_cookie_file: str | None = None
+    cookiecloud_url: str | None = None
+    cookiecloud_key: str | None = None
+    cookiecloud_password: str | None = None
+    cookiecloud_sync_interval_seconds: int | None = None
+    # Backward-compatible legacy names for v0.2.10
     subhd_cookiecloud_url: str | None = None
     subhd_cookiecloud_key: str | None = None
     subhd_cookiecloud_password: str | None = None
-    subhd_cookiecloud_sync_interval_seconds: int = 1800
+    subhd_cookiecloud_sync_interval_seconds: int | None = None
 
     addic7ed_username: str | None = None
     addic7ed_password: str | None = None
@@ -116,16 +121,36 @@ class Settings(BaseSettings):
             return 1800
         return max(0, parsed)
 
-    @field_validator("subhd_cookiecloud_sync_interval_seconds", mode="before")
+    @field_validator("cookiecloud_sync_interval_seconds", "subhd_cookiecloud_sync_interval_seconds", mode="before")
     @classmethod
-    def normalize_subhd_cookiecloud_sync_interval_seconds(cls, value: Any) -> int:
+    def normalize_cookiecloud_sync_interval_seconds(cls, value: Any) -> int | None:
         if value is None:
-            return 1800
+            return None
         try:
             parsed = int(value)
         except (TypeError, ValueError):
-            return 1800
+            return None
         return max(0, parsed)
+
+    @property
+    def effective_cookiecloud_url(self) -> str | None:
+        return self.cookiecloud_url or self.subhd_cookiecloud_url
+
+    @property
+    def effective_cookiecloud_key(self) -> str | None:
+        return self.cookiecloud_key or self.subhd_cookiecloud_key
+
+    @property
+    def effective_cookiecloud_password(self) -> str | None:
+        return self.cookiecloud_password or self.subhd_cookiecloud_password
+
+    @property
+    def effective_cookiecloud_sync_interval_seconds(self) -> int:
+        if self.cookiecloud_sync_interval_seconds is not None:
+            return self.cookiecloud_sync_interval_seconds
+        if self.subhd_cookiecloud_sync_interval_seconds is not None:
+            return self.subhd_cookiecloud_sync_interval_seconds
+        return 1800
 
     @property
     def provider_list(self) -> list[str]:

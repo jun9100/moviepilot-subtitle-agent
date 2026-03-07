@@ -92,21 +92,21 @@ class ChineseSubtitleProvider:
         subhd_captcha_cooldown_seconds: int = 1800,
         subhd_cookie_string: str | None = None,
         subhd_cookie_file: str | None = None,
-        subhd_cookiecloud_url: str | None = None,
-        subhd_cookiecloud_key: str | None = None,
-        subhd_cookiecloud_password: str | None = None,
-        subhd_cookiecloud_sync_interval_seconds: int = 1800,
+        cookiecloud_url: str | None = None,
+        cookiecloud_key: str | None = None,
+        cookiecloud_password: str | None = None,
+        cookiecloud_sync_interval_seconds: int = 1800,
     ) -> None:
         self._timeout = timeout_seconds
         self._allow_season_pack_for_episode = allow_season_pack_for_episode
         self._strict_media_type_filter = strict_media_type_filter
         self._subhd_captcha_cooldown_seconds = max(0, int(subhd_captcha_cooldown_seconds or 0))
         self._subhd_domain_cooldown_until: dict[str, float] = {}
-        self._subhd_cookiecloud_url = str(subhd_cookiecloud_url or "").strip().rstrip("/")
-        self._subhd_cookiecloud_key = str(subhd_cookiecloud_key or "").strip()
-        self._subhd_cookiecloud_password = str(subhd_cookiecloud_password or "").strip()
-        self._subhd_cookiecloud_sync_interval_seconds = max(0, int(subhd_cookiecloud_sync_interval_seconds or 0))
-        self._subhd_cookiecloud_last_sync_at = 0.0
+        self._cookiecloud_url = str(cookiecloud_url or "").strip().rstrip("/")
+        self._cookiecloud_key = str(cookiecloud_key or "").strip()
+        self._cookiecloud_password = str(cookiecloud_password or "").strip()
+        self._cookiecloud_sync_interval_seconds = max(0, int(cookiecloud_sync_interval_seconds or 0))
+        self._cookiecloud_last_sync_at = 0.0
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -404,15 +404,15 @@ class ChineseSubtitleProvider:
             logger.info("loaded %d subhd cookie entries", loaded)
 
     def _sync_subhd_cookies_from_cookiecloud(self, *, force: bool) -> bool:
-        if not (self._subhd_cookiecloud_url and self._subhd_cookiecloud_key and self._subhd_cookiecloud_password):
+        if not (self._cookiecloud_url and self._cookiecloud_key and self._cookiecloud_password):
             return False
 
         now = time.monotonic()
-        interval = self._subhd_cookiecloud_sync_interval_seconds
-        if not force and interval > 0 and (now - self._subhd_cookiecloud_last_sync_at) < interval:
+        interval = self._cookiecloud_sync_interval_seconds
+        if not force and interval > 0 and (now - self._cookiecloud_last_sync_at) < interval:
             return False
 
-        self._subhd_cookiecloud_last_sync_at = now
+        self._cookiecloud_last_sync_at = now
         cookie_string = self._fetch_subhd_cookie_string_from_cookiecloud()
         if not cookie_string:
             return False
@@ -422,11 +422,11 @@ class ChineseSubtitleProvider:
         return True
 
     def _fetch_subhd_cookie_string_from_cookiecloud(self) -> str:
-        endpoint = urljoin(f"{self._subhd_cookiecloud_url}/", f"get/{self._subhd_cookiecloud_key}")
+        endpoint = urljoin(f"{self._cookiecloud_url}/", f"get/{self._cookiecloud_key}")
         try:
             response = self._session.post(
                 endpoint,
-                json={"password": self._subhd_cookiecloud_password},
+                json={"password": self._cookiecloud_password},
                 timeout=self._timeout,
                 allow_redirects=True,
             )

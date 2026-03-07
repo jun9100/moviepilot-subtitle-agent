@@ -313,10 +313,10 @@ def test_subhd_cookiecloud_auto_sync_to_mirrors(monkeypatch):
 
     provider = ChineseSubtitleProvider(
         timeout_seconds=5,
-        subhd_cookiecloud_url="https://mp.fansoar.com/cookiecloud",
-        subhd_cookiecloud_key="demo_key",
-        subhd_cookiecloud_password="demo_pwd",
-        subhd_cookiecloud_sync_interval_seconds=0,
+        cookiecloud_url="https://mp.fansoar.com/cookiecloud",
+        cookiecloud_key="demo_key",
+        cookiecloud_password="demo_pwd",
+        cookiecloud_sync_interval_seconds=0,
     )
 
     assert calls == [("https://mp.fansoar.com/cookiecloud/get/demo_key", {"password": "demo_pwd"})]
