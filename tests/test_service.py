@@ -40,6 +40,51 @@ class _FakeBackend:
         return 88
 
 
+class _MemorySubtitle:
+    def __init__(
+        self,
+        *,
+        provider_name: str,
+        subtitle_id: str,
+        score: int,
+        content: bytes | None,
+        language: str = "zh",
+        subtitle_format: str = "srt",
+    ) -> None:
+        self.provider_name = provider_name
+        self.id = subtitle_id
+        self.subtitle_format = subtitle_format
+        self.language = language
+        self.content = content
+        self._score = score
+
+    @staticmethod
+    def get_matches(_video):
+        return {"episode", "year"}
+
+
+class _StagedBackend:
+    def __init__(self, subtitles_by_provider: dict[str, list[_MemorySubtitle]]) -> None:
+        self._subtitles_by_provider = subtitles_by_provider
+
+    def list_subtitles(self, videos, languages, *, providers, provider_configs):
+        video = next(iter(videos))
+        subtitles = []
+        for provider in providers:
+            subtitles.extend(self._subtitles_by_provider.get(provider, []))
+        return {video: subtitles}
+
+    @staticmethod
+    def download_subtitles(subtitles, *, providers, provider_configs):
+        # No-op: content is pre-baked in _MemorySubtitle.
+        for _subtitle in subtitles:
+            continue
+
+    @staticmethod
+    def compute_score(subtitle, video, hearing_impaired=False):
+        return int(getattr(subtitle, "_score", 0))
+
+
 def _settings(tmp_path):
     return Settings(
         default_providers="assrt,subhd",
@@ -204,7 +249,7 @@ def test_search_fallback_chain_tries_secondary_then_opensubtitles(tmp_path):
 
     calls: list[list[str]] = []
 
-    def fake_search_with_subliminal(self, *, query, providers):
+    def fake_search_with_subliminal(self, *, query, providers, stage_index=None):
         calls.append(list(providers))
         return []
 
@@ -243,7 +288,7 @@ def test_search_stops_before_opensubtitles_when_secondary_has_results(tmp_path):
 
     calls: list[list[str]] = []
 
-    def fake_search_with_subliminal(self, *, query, providers):
+    def fake_search_with_subliminal(self, *, query, providers, stage_index=None):
         calls.append(list(providers))
         if providers == ["podnapisi", "tvsubtitles"]:
             return [
@@ -297,7 +342,7 @@ def test_search_respects_custom_provider_stage_order(tmp_path):
 
     calls: list[list[str]] = []
 
-    def fake_search_with_subliminal(self, *, query, providers):
+    def fake_search_with_subliminal(self, *, query, providers, stage_index=None):
         calls.append(list(providers))
         return [
             SubtitleSearchItem(
@@ -354,7 +399,7 @@ def test_download_uses_subliminal_fallback_when_direct_candidates_fail(tmp_path)
         chinese_provider=provider,
     )
 
-    def fake_search_with_subliminal(self, *, query, providers):
+    def fake_search_with_subliminal(self, *, query, providers, stage_index=None):
         subtitle = _FakeSubliminalSubtitle()
         token = "fallback-token"
         with self._lock:
@@ -363,6 +408,7 @@ def test_download_uses_subliminal_fallback_when_direct_candidates_fail(tmp_path)
                 payload=subtitle,
                 query=query,
                 created_at=self._now_fn(),
+                stage_index=stage_index,
             )
         return [
             SubtitleSearchItem(
@@ -398,3 +444,102 @@ def test_download_uses_subliminal_fallback_when_direct_candidates_fail(tmp_path)
     assert downloaded.provider == "podnapisi"
     content = tmp_path.joinpath(downloaded.filename).read_bytes()
     assert "回退中文字幕".encode("utf-8") in content
+
+
+def test_download_retries_other_candidates_in_same_stage(tmp_path):
+    provider = FakeChineseProvider([make_candidate(subtitle_id="s-direct", score=80)])
+    backend = _StagedBackend(
+        {
+            "opensubtitlescom": [
+                _MemorySubtitle(
+                    provider_name="opensubtitlescom",
+                    subtitle_id="open-empty",
+                    score=220,
+                    content=None,
+                ),
+                _MemorySubtitle(
+                    provider_name="opensubtitlescom",
+                    subtitle_id="open-zh",
+                    score=210,
+                    content="1\n00:00:00,000 --> 00:00:01,000\n同阶段候选命中\n".encode("utf-8"),
+                ),
+            ]
+        }
+    )
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="assrt",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            provider_stage_order="opensubtitlescom|assrt",
+            enable_subliminal_fallback=True,
+            min_score=0,
+        ),
+        backend=backend,
+        chinese_provider=provider,
+    )
+
+    search_result = service.search(
+        SearchRequest(
+            title="短剧开始啦",
+            media_type="tv",
+            season=1,
+            episode=3,
+            languages=["zh-cn", "zh-tw"],
+            limit=5,
+        )
+    )
+    token = search_result.items[0].token
+    downloaded = service.download_to_disk(token)
+
+    assert downloaded.provider == "opensubtitlescom"
+    assert downloaded.subtitle_id == "open-zh"
+    content = tmp_path.joinpath(downloaded.filename).read_bytes()
+    assert "同阶段候选命中".encode("utf-8") in content
+
+
+def test_download_falls_through_to_next_stage_when_first_stage_fails(tmp_path):
+    provider = FakeChineseProvider(
+        [make_candidate(subtitle_id="assrt-zh", score=180, provider="assrt")]
+    )
+    backend = _StagedBackend(
+        {
+            "opensubtitlescom": [
+                _MemorySubtitle(
+                    provider_name="opensubtitlescom",
+                    subtitle_id="open-empty",
+                    score=260,
+                    content=None,
+                )
+            ]
+        }
+    )
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="assrt",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            provider_stage_order="opensubtitlescom|assrt",
+            enable_subliminal_fallback=True,
+            min_score=0,
+        ),
+        backend=backend,
+        chinese_provider=provider,
+    )
+
+    search_result = service.search(
+        SearchRequest(
+            title="短剧开始啦",
+            media_type="tv",
+            season=1,
+            episode=3,
+            languages=["zh-cn", "zh-tw"],
+            limit=5,
+        )
+    )
+    token = search_result.items[0].token
+    downloaded = service.download_to_disk(token)
+
+    assert downloaded.provider == "assrt"
+    assert downloaded.subtitle_id == "assrt-zh"
+    assert provider.search_calls == 1

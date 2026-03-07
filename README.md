@@ -10,6 +10,7 @@
 - 优先使用中文源（`assrt` + `subhd` + `subhdtw`，均支持检索与下载）。
 - 多源分层检索：`assrt/subhd/subhdtw` → `podnapisi/tvsubtitles` → `opensubtitles`（可配置，不写死）。
 - OpenSubtitles 仅作为最后兜底。
+- 下载自动重试：先换同阶段候选，再自动进入下一阶段源，减少“搜到但下不下来”。
 
 ## 主要功能
 
@@ -118,6 +119,7 @@ PROVIDER_STAGE_ORDER=opensubtitlescom,opensubtitles|assrt,subhd,subhdtw|podnapis
 
 ## 更新记录（近期）
 
+- `v0.2.1`：下载失败时自动在同阶段切换候选，仍失败则自动进入下一阶段 provider 重试（覆盖 `subliminal/direct` 混合场景）。
 - `v0.2.0`：新增 `PROVIDER_STAGE_ORDER`、`MIN_SCORE`、`ALLOW_SEASON_PACK_FOR_EPISODE`，支持按用户偏好调整源优先级与匹配严格度（不再写死顺序）。
 - `v0.1.9`：新增 `subhdtw` 直连源，并为 `subhd/subhdtw` 下载加入多镜像轮询重试（`subhd.tv/subhdtw.com/subhd.cc/subhd.me`）。
 - `v0.1.8`：当 `assrt/subhd` 直连下载失败（含 `subhd` 验证码拦截）时，自动继续使用 fallback 下载链路（`podnapisi/tvsubtitles/opensubtitles`）。

@@ -25,6 +25,7 @@ class CachedSubtitle:
     payload: Any
     query: SearchRequest
     created_at: datetime
+    stage_index: int | None = None
 
 
 @dataclass
@@ -65,7 +66,7 @@ class SubtitleService:
         results: list[SubtitleSearchItem] = []
         last_error: Exception | None = None
 
-        for stage_providers in self._settings.provider_stage_list:
+        for stage_index, stage_providers in enumerate(self._settings.provider_stage_list):
             stage_results: list[SubtitleSearchItem] = []
 
             direct_providers = [item for item in stage_providers if item.lower() in self._DIRECT_PROVIDER_NAMES]
@@ -73,14 +74,24 @@ class SubtitleService:
 
             if direct_providers:
                 try:
-                    stage_results.extend(self._search_with_direct_providers(query=query, providers=direct_providers))
+                    stage_results.extend(
+                        self._search_with_direct_providers(
+                            query=query,
+                            providers=direct_providers,
+                            stage_index=stage_index,
+                        )
+                    )
                 except Exception as exc:
                     last_error = exc
 
             if subliminal_providers:
                 try:
                     stage_results.extend(
-                        self._search_with_subliminal_providers(query=query, providers=subliminal_providers)
+                        self._search_with_subliminal_providers(
+                            query=query,
+                            providers=subliminal_providers,
+                            stage_index=stage_index,
+                        )
                     )
                 except Exception as exc:
                     last_error = exc
@@ -115,6 +126,7 @@ class SubtitleService:
         *,
         query: SearchRequest,
         providers: list[str],
+        stage_index: int | None = None,
     ) -> list[SubtitleSearchItem]:
         try:
             direct_candidates = self._chinese_provider.search(query, providers=providers)
@@ -130,6 +142,7 @@ class SubtitleService:
                     payload=candidate,
                     query=query,
                     created_at=self._now_fn(),
+                    stage_index=stage_index,
                 )
 
             items.append(
@@ -241,6 +254,7 @@ class SubtitleService:
                     query=query,
                     filename=filename,
                     requires_chinese=requires_chinese,
+                    response_token=token,
                 )
             except Exception as exc:
                 if last_error:
@@ -266,21 +280,26 @@ class SubtitleService:
         query: SearchRequest,
         filename: str | None,
         requires_chinese: bool,
+        response_token: str,
     ) -> InMemorySubtitle | None:
-        provider_groups: list[list[str]] = []
-        for stage in self._settings.provider_stage_list:
+        provider_groups: list[tuple[int, list[str]]] = []
+        for stage_index, stage in enumerate(self._settings.provider_stage_list):
             subliminal_stage = [item for item in stage if item.lower() not in self._DIRECT_PROVIDER_NAMES]
             if subliminal_stage:
-                provider_groups.append(subliminal_stage)
+                provider_groups.append((stage_index, subliminal_stage))
         download_error: Exception | None = None
         search_error: Exception | None = None
 
-        for providers in provider_groups:
+        for stage_index, providers in provider_groups:
             if not providers:
                 continue
 
             try:
-                items = self._search_with_subliminal_providers(query=query, providers=providers)
+                items = self._search_with_subliminal_providers(
+                    query=query,
+                    providers=providers,
+                    stage_index=stage_index,
+                )
             except Exception as exc:
                 search_error = exc
                 continue
@@ -289,15 +308,15 @@ class SubtitleService:
             items.sort(key=lambda item: item.score, reverse=True)
             for item in items:
                 try:
-                    fetched = self.fetch_to_memory(item.token, filename=filename)
+                    fallback_entry = self._get_cached_subtitle(item.token)
+                    fetched = self._fetch_entry_once(
+                        response_token=response_token,
+                        entry=fallback_entry,
+                        filename=filename,
+                        requires_chinese=requires_chinese,
+                    )
                 except Exception as exc:
                     download_error = exc
-                    continue
-
-                if requires_chinese and not self._content_has_chinese_text(fetched.content):
-                    download_error = SubtitleDownloadError(
-                        "downloaded fallback subtitle content does not contain Chinese text"
-                    )
                     continue
 
                 return fetched
@@ -314,6 +333,183 @@ class SubtitleService:
         entry: CachedSubtitle,
         *,
         filename: str | None,
+    ) -> InMemorySubtitle:
+        query = entry.query
+        requires_chinese = self._requires_chinese_subtitle(query.languages)
+
+        try:
+            return self._fetch_entry_once(
+                response_token=token,
+                entry=entry,
+                filename=filename,
+                requires_chinese=requires_chinese,
+            )
+        except Exception as exc:
+            primary_error = exc
+
+        start_stage_index = self._resolve_stage_index(entry)
+        exclude_keys = set()
+        failed_key = self._entry_key(entry)
+        if failed_key is not None:
+            exclude_keys.add(failed_key)
+
+        try:
+            fallback = self._fetch_with_stage_failover(
+                query=query,
+                filename=filename,
+                requires_chinese=requires_chinese,
+                response_token=token,
+                start_stage_index=start_stage_index,
+                exclude_keys=exclude_keys,
+            )
+        except Exception as exc:
+            raise SubtitleDownloadError(
+                f"subtitle download failed: {primary_error}; stage failover failed: {exc}"
+            ) from exc
+
+        if fallback is not None:
+            return fallback
+
+        raise SubtitleDownloadError(
+            f"subtitle download failed: {primary_error}; stage failover exhausted"
+        ) from primary_error
+
+    def _fetch_with_stage_failover(
+        self,
+        *,
+        query: SearchRequest,
+        filename: str | None,
+        requires_chinese: bool,
+        response_token: str,
+        start_stage_index: int,
+        exclude_keys: set[tuple[str, str]] | None = None,
+    ) -> InMemorySubtitle | None:
+        stages = self._settings.provider_stage_list
+        if not stages:
+            return None
+
+        seen_keys = set(exclude_keys or set())
+        last_download_error: Exception | None = None
+        last_search_error: Exception | None = None
+
+        for stage_index in range(start_stage_index, len(stages)):
+            stage_providers = stages[stage_index]
+            direct_providers = [item for item in stage_providers if item.lower() in self._DIRECT_PROVIDER_NAMES]
+            subliminal_providers = [item for item in stage_providers if item.lower() not in self._DIRECT_PROVIDER_NAMES]
+
+            stage_items: list[SubtitleSearchItem] = []
+            if direct_providers:
+                try:
+                    stage_items.extend(
+                        self._search_with_direct_providers(
+                            query=query,
+                            providers=direct_providers,
+                            stage_index=stage_index,
+                        )
+                    )
+                except Exception as exc:
+                    last_search_error = exc
+
+            if subliminal_providers:
+                try:
+                    stage_items.extend(
+                        self._search_with_subliminal_providers(
+                            query=query,
+                            providers=subliminal_providers,
+                            stage_index=stage_index,
+                        )
+                    )
+                except Exception as exc:
+                    last_search_error = exc
+
+            stage_items = [item for item in stage_items if item.score >= self._settings.min_score]
+            stage_items.sort(key=lambda item: item.score, reverse=True)
+
+            for item in stage_items:
+                item_key = self._subtitle_item_key(item.provider, item.subtitle_id)
+                if item_key in seen_keys:
+                    continue
+                seen_keys.add(item_key)
+
+                try:
+                    current_entry = self._get_cached_subtitle(item.token)
+                    fetched = self._fetch_entry_once(
+                        response_token=response_token,
+                        entry=current_entry,
+                        filename=filename,
+                        requires_chinese=requires_chinese,
+                    )
+                except Exception as exc:
+                    last_download_error = exc
+                    continue
+
+                return fetched
+
+        if last_download_error is not None:
+            raise SubtitleDownloadError(str(last_download_error)) from last_download_error
+        if last_search_error is not None:
+            raise SubtitleDownloadError(str(last_search_error)) from last_search_error
+        return None
+
+    def _fetch_entry_once(
+        self,
+        *,
+        response_token: str,
+        entry: CachedSubtitle,
+        filename: str | None,
+        requires_chinese: bool,
+    ) -> InMemorySubtitle:
+        if entry.kind == "direct":
+            return self._fetch_direct_entry_once(
+                response_token=response_token,
+                entry=entry,
+                filename=filename,
+                requires_chinese=requires_chinese,
+            )
+
+        if entry.kind == "subliminal":
+            return self._fetch_subliminal_entry_once(
+                response_token=response_token,
+                entry=entry,
+                filename=filename,
+                requires_chinese=requires_chinese,
+            )
+
+        raise SubtitleDownloadError("unknown subtitle cache entry")
+
+    def _fetch_direct_entry_once(
+        self,
+        *,
+        response_token: str,
+        entry: CachedSubtitle,
+        filename: str | None,
+        requires_chinese: bool,
+    ) -> InMemorySubtitle:
+        candidate = entry.payload
+        if not isinstance(candidate, DirectSubtitleCandidate):
+            raise SubtitleDownloadError("invalid direct subtitle payload")
+
+        downloaded = self._chinese_provider.download(candidate, query=entry.query)
+        if not downloaded.content:
+            raise SubtitleDownloadError("subtitle content is empty")
+        if requires_chinese and not self._content_has_chinese_text(downloaded.content):
+            raise SubtitleDownloadError("downloaded subtitle content does not contain Chinese text")
+
+        return self._build_in_memory_direct(
+            token=response_token,
+            query=entry.query,
+            candidate=candidate,
+            downloaded=downloaded,
+            filename=filename,
+        )
+
+    def _fetch_subliminal_entry_once(
+        self,
+        *,
+        response_token: str,
+        entry: CachedSubtitle,
+        filename: str | None,
+        requires_chinese: bool,
     ) -> InMemorySubtitle:
         subtitle = entry.payload
         provider = str(getattr(subtitle, "provider_name", "unknown"))
@@ -335,6 +531,8 @@ class SubtitleService:
 
         if not content:
             raise SubtitleDownloadError("subtitle content is empty")
+        if requires_chinese and not self._content_has_chinese_text(content):
+            raise SubtitleDownloadError("downloaded subtitle content does not contain Chinese text")
 
         subtitle_id = self._subtitle_id(subtitle)
         subtitle_format = str(getattr(subtitle, "subtitle_format", "srt") or "srt")
@@ -347,7 +545,7 @@ class SubtitleService:
         )
 
         return InMemorySubtitle(
-            token=token,
+            token=response_token,
             subtitle_id=subtitle_id,
             provider=provider,
             filename=resolved_filename,
@@ -360,6 +558,7 @@ class SubtitleService:
         *,
         query: SearchRequest,
         providers: list[str],
+        stage_index: int | None = None,
     ) -> list[SubtitleSearchItem]:
         languages = parse_languages(query.languages)
         video = self._build_video(query)
@@ -386,6 +585,7 @@ class SubtitleService:
                     payload=subtitle,
                     query=query,
                     created_at=self._now_fn(),
+                    stage_index=stage_index,
                 )
 
             provider = str(getattr(subtitle, "provider_name", "unknown"))
@@ -501,6 +701,35 @@ class SubtitleService:
     @staticmethod
     def _candidate_key(candidate: DirectSubtitleCandidate) -> tuple[str, str, str]:
         return candidate.provider, candidate.subtitle_id, candidate.download_url
+
+    @staticmethod
+    def _subtitle_item_key(provider: str, subtitle_id: str) -> tuple[str, str]:
+        return provider.strip().lower(), subtitle_id.strip()
+
+    def _entry_key(self, entry: CachedSubtitle) -> tuple[str, str] | None:
+        if entry.kind == "direct" and isinstance(entry.payload, DirectSubtitleCandidate):
+            return self._subtitle_item_key(entry.payload.provider, entry.payload.subtitle_id)
+        if entry.kind == "subliminal":
+            provider = str(getattr(entry.payload, "provider_name", "unknown"))
+            subtitle_id = self._subtitle_id(entry.payload)
+            return self._subtitle_item_key(provider, subtitle_id)
+        return None
+
+    def _resolve_stage_index(self, entry: CachedSubtitle) -> int:
+        stages = self._settings.provider_stage_list
+        if not stages:
+            return 0
+
+        if entry.stage_index is not None and 0 <= entry.stage_index < len(stages):
+            return entry.stage_index
+
+        key = self._entry_key(entry)
+        provider = key[0] if key else ""
+        if provider:
+            for index, stage in enumerate(stages):
+                if any(item.strip().lower() == provider for item in stage):
+                    return index
+        return 0
 
     def _direct_fallback_candidates(
         self,
