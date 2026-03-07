@@ -19,12 +19,14 @@ class FakeChineseProvider:
         self.error_by_subtitle_id = error_by_subtitle_id or {}
         self.subtitle_format = subtitle_format
         self.search_calls = 0
+        self.download_calls: list[str] = []
 
     def search(self, query, *, providers):
         self.search_calls += 1
         return list(self.candidates)
 
     def download(self, candidate, *, query):
+        self.download_calls.append(str(candidate.subtitle_id))
         forced_error = self.error_by_subtitle_id.get(candidate.subtitle_id)
         if forced_error is not None:
             raise forced_error

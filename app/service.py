@@ -289,21 +289,30 @@ class SubtitleService:
                     exclude={self._candidate_key(candidate)},
                 )
             )
+        candidates_to_try = self._prioritize_direct_candidates(candidates_to_try)
 
         max_attempts = 8
         attempts = 0
         last_error: Exception | None = None
         fallback_checked = False
+        skip_subhd_family = False
 
         for current_candidate in candidates_to_try:
             if attempts >= max_attempts:
                 break
+            family = self._direct_provider_family(current_candidate.provider)
+            if skip_subhd_family and family == "subhd-family":
+                continue
             attempts += 1
 
             try:
                 downloaded = self._chinese_provider.download(current_candidate, query=query)
             except Exception as exc:
                 last_error = exc
+                if self._is_subhd_captcha_error(exc):
+                    # Captcha in one subhd mirror usually means all subhd-family candidates
+                    # are blocked for current session; skip and move to other providers/fallback.
+                    skip_subhd_family = True
                 continue
 
             if not downloaded.content:
@@ -842,6 +851,35 @@ class SubtitleService:
 
         candidates.sort(key=lambda item: item.score, reverse=True)
         return candidates
+
+    @staticmethod
+    def _direct_provider_family(provider: str) -> str:
+        normalized = str(provider or "").strip().lower()
+        if normalized in {"subhd", "subhdtw"}:
+            return "subhd-family"
+        return normalized or "unknown"
+
+    @classmethod
+    def _prioritize_direct_candidates(cls, candidates: list[DirectSubtitleCandidate]) -> list[DirectSubtitleCandidate]:
+        non_subhd: list[DirectSubtitleCandidate] = []
+        subhd_family: list[DirectSubtitleCandidate] = []
+        for item in candidates:
+            family = cls._direct_provider_family(item.provider)
+            if family == "subhd-family":
+                subhd_family.append(item)
+            else:
+                non_subhd.append(item)
+
+        non_subhd.sort(key=lambda item: item.score, reverse=True)
+        subhd_family.sort(key=lambda item: item.score, reverse=True)
+        return non_subhd + subhd_family
+
+    @staticmethod
+    def _is_subhd_captcha_error(exc: Exception) -> bool:
+        text = str(exc or "").strip().lower()
+        if not text:
+            return False
+        return "captcha" in text and "subhd" in text
 
     @staticmethod
     def _requires_chinese_subtitle(requested_languages: list[str]) -> bool:

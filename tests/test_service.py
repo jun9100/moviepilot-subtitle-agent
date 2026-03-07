@@ -614,6 +614,45 @@ def test_download_retries_other_candidates_in_same_stage(tmp_path):
     assert "同阶段候选命中".encode("utf-8") in content
 
 
+def test_download_prioritizes_non_subhd_candidates_before_subhd_family(tmp_path):
+    provider = FakeChineseProvider(
+        [
+            make_candidate(subtitle_id="s-subhd", score=260, provider="subhd"),
+            make_candidate(subtitle_id="s-assrt", score=180, provider="assrt"),
+        ],
+        content_by_subtitle_id={
+            "s-assrt": "1\n00:00:00,000 --> 00:00:01,000\n优先尝试assrt成功\n".encode("utf-8"),
+            "s-subhd": "1\n00:00:00,000 --> 00:00:01,000\nsubhd内容\n".encode("utf-8"),
+        },
+    )
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="assrt,subhd",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            token_ttl_seconds=3600,
+            enable_subliminal_fallback=False,
+        ),
+        chinese_provider=provider,
+    )
+
+    search_result = service.search(
+        SearchRequest(
+            title="测试剧集",
+            media_type="tv",
+            season=1,
+            episode=1,
+            languages=["zh-cn", "zh-tw"],
+            limit=1,
+        )
+    )
+    token = search_result.items[0].token
+    downloaded = service.download_to_disk(token)
+
+    assert downloaded.provider == "assrt"
+    assert provider.download_calls[0] == "s-assrt"
+
+
 def test_download_falls_through_to_next_stage_when_first_stage_fails(tmp_path):
     provider = FakeChineseProvider(
         [make_candidate(subtitle_id="assrt-zh", score=180, provider="assrt")]
