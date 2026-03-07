@@ -39,6 +39,15 @@ class InMemorySubtitle:
     content: bytes
 
 
+@dataclass(frozen=True)
+class ChineseSubtitleConfidence:
+    score: float
+    chinese_chars: int
+    latin_chars: int
+    dialogue_lines: int
+    chinese_lines: int
+
+
 class SubtitleService:
     _DIRECT_PROVIDER_NAMES = {"assrt", "subhd", "subhdtw"}
 
@@ -56,6 +65,7 @@ class SubtitleService:
             timeout_seconds=settings.request_timeout_seconds,
             user_agent=settings.user_agent,
             allow_season_pack_for_episode=settings.allow_season_pack_for_episode,
+            strict_media_type_filter=settings.strict_media_type_filter,
         )
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._lock = threading.RLock()
@@ -300,9 +310,11 @@ class SubtitleService:
                 last_error = SubtitleDownloadError("subtitle content is empty")
                 continue
 
-            if requires_chinese and not self._content_has_chinese_text(downloaded.content):
-                last_error = SubtitleDownloadError("downloaded subtitle content does not contain Chinese text")
-                continue
+            if requires_chinese:
+                is_verified, confidence = self._verify_chinese_content(downloaded.content)
+                if not is_verified:
+                    last_error = SubtitleDownloadError(self._chinese_confidence_error(confidence))
+                    continue
 
             return self._build_in_memory_direct(
                 token=token,
@@ -544,8 +556,10 @@ class SubtitleService:
         downloaded = self._chinese_provider.download(candidate, query=entry.query)
         if not downloaded.content:
             raise SubtitleDownloadError("subtitle content is empty")
-        if requires_chinese and not self._content_has_chinese_text(downloaded.content):
-            raise SubtitleDownloadError("downloaded subtitle content does not contain Chinese text")
+        if requires_chinese:
+            is_verified, confidence = self._verify_chinese_content(downloaded.content)
+            if not is_verified:
+                raise SubtitleDownloadError(self._chinese_confidence_error(confidence))
 
         return self._build_in_memory_direct(
             token=response_token,
@@ -583,8 +597,10 @@ class SubtitleService:
 
         if not content:
             raise SubtitleDownloadError("subtitle content is empty")
-        if requires_chinese and not self._content_has_chinese_text(content):
-            raise SubtitleDownloadError("downloaded subtitle content does not contain Chinese text")
+        if requires_chinese:
+            is_verified, confidence = self._verify_chinese_content(content)
+            if not is_verified:
+                raise SubtitleDownloadError(self._chinese_confidence_error(confidence))
 
         subtitle_id = self._subtitle_id(subtitle)
         subtitle_format = str(getattr(subtitle, "subtitle_format", "srt") or "srt")
@@ -868,22 +884,129 @@ class SubtitleService:
         return content.decode("utf-8", errors="ignore")
 
     @classmethod
-    def _content_has_chinese_text(cls, content: bytes) -> bool:
+    def _extract_dialogue_lines(cls, text: str) -> list[str]:
+        lines: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            lowered = line.lower()
+            if lowered in {"webvtt"}:
+                continue
+            if lowered.startswith(("kind:", "language:", "note", "style", "region")):
+                continue
+            if re.fullmatch(r"\d{1,6}", line):
+                continue
+            if re.match(
+                r"^\d{1,2}:\d{2}:\d{2}[,.:]\d{2,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.:]\d{2,3}",
+                line,
+            ):
+                continue
+            if line.startswith("-->"):
+                continue
+
+            if lowered.startswith("dialogue:"):
+                parts = line.split(",", 9)
+                if len(parts) == 10:
+                    line = parts[9]
+                else:
+                    line = line[len("Dialogue:") :]
+
+            normalized = cls._normalize_subtitle_line(line)
+            if normalized:
+                lines.append(normalized)
+
+        return lines
+
+    @staticmethod
+    def _normalize_subtitle_line(line: str) -> str:
+        normalized = line.replace("\\N", " ").replace("\\n", " ")
+        normalized = re.sub(r"\{[^{}]*\}", " ", normalized)
+        normalized = re.sub(r"<[^>]+>", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
+
+    @classmethod
+    def _calculate_chinese_confidence(cls, content: bytes) -> ChineseSubtitleConfidence:
         text = cls._decode_subtitle_text(content)
         if not text:
-            return False
+            return ChineseSubtitleConfidence(
+                score=0.0,
+                chinese_chars=0,
+                latin_chars=0,
+                dialogue_lines=0,
+                chinese_lines=0,
+            )
 
-        chinese_count = len(re.findall(r"[\u3400-\u9fff]", text))
-        if chinese_count >= 20:
-            return True
-        if chinese_count == 0:
-            return False
+        dialogue_lines = cls._extract_dialogue_lines(text)
+        if not dialogue_lines:
+            fallback_line = cls._normalize_subtitle_line(text)
+            if fallback_line:
+                dialogue_lines = [fallback_line]
 
-        visible_count = len(re.findall(r"[A-Za-z\u3400-\u9fff]", text))
-        if visible_count <= 0:
-            return False
+        chinese_chars = 0
+        latin_chars = 0
+        chinese_lines = 0
+        effective_lines = 0
 
-        return (chinese_count / visible_count) >= 0.01
+        for line in dialogue_lines:
+            zh_count = len(re.findall(r"[\u3400-\u9fff]", line))
+            en_count = len(re.findall(r"[A-Za-z]", line))
+            if zh_count == 0 and en_count == 0:
+                continue
+
+            effective_lines += 1
+            chinese_chars += zh_count
+            latin_chars += en_count
+            if zh_count > 0:
+                chinese_lines += 1
+
+        if effective_lines == 0:
+            return ChineseSubtitleConfidence(
+                score=0.0,
+                chinese_chars=0,
+                latin_chars=0,
+                dialogue_lines=0,
+                chinese_lines=0,
+            )
+
+        line_ratio = chinese_lines / effective_lines
+        char_ratio = chinese_chars / max(1, chinese_chars + latin_chars)
+        amount_score = min(1.0, chinese_chars / 80.0)
+        score = (line_ratio * 0.55) + (char_ratio * 0.30) + (amount_score * 0.15)
+
+        return ChineseSubtitleConfidence(
+            score=score,
+            chinese_chars=chinese_chars,
+            latin_chars=latin_chars,
+            dialogue_lines=effective_lines,
+            chinese_lines=chinese_lines,
+        )
+
+    def _verify_chinese_content(self, content: bytes) -> tuple[bool, ChineseSubtitleConfidence]:
+        confidence = self._calculate_chinese_confidence(content)
+        if confidence.chinese_chars <= 0:
+            return False, confidence
+
+        if not self._settings.enable_content_language_validation:
+            return True, confidence
+
+        if confidence.chinese_chars < self._settings.chinese_confidence_min_chars:
+            return False, confidence
+        if confidence.score < self._settings.chinese_confidence_threshold:
+            return False, confidence
+        return True, confidence
+
+    def _chinese_confidence_error(self, confidence: ChineseSubtitleConfidence) -> str:
+        threshold = self._settings.chinese_confidence_threshold
+        min_chars = self._settings.chinese_confidence_min_chars
+        return (
+            "downloaded subtitle content failed Chinese confidence validation "
+            f"(score={confidence.score:.2f}, threshold={threshold:.2f}, "
+            f"zh_lines={confidence.chinese_lines}/{confidence.dialogue_lines}, "
+            f"zh_chars={confidence.chinese_chars}, min_chars={min_chars})"
+        )
 
     @staticmethod
     def _sanitize_filename(name: str) -> str:

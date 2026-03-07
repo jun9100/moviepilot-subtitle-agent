@@ -86,8 +86,17 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 - `ALLOW_SEASON_PACK_FOR_EPISODE`：
   - `true`（默认）：允许整季包用于单集请求（命中率更高）。
   - `false`：仅接受更严格的单集匹配（准确率更高）。
+- `STRICT_MEDIA_TYPE_FILTER`：
+  - `true`（默认）：对 `movie/tv` 启用强约束，避免电影请求混入剧集候选、剧集请求混入电影候选。
+  - `false`：回退为更宽松匹配策略（命中率更高但误匹配风险上升）。
 
-### 3) 阶段内并发搜索（可配置）
+### 3) 内容级中文置信度校验（可配置）
+
+- `ENABLE_CONTENT_LANGUAGE_VALIDATION`：默认 `true`，下载后按字幕正文评估中文置信度。
+- `CHINESE_CONFIDENCE_THRESHOLD`：默认 `0.25`，越高越严格。
+- `CHINESE_CONFIDENCE_MIN_CHARS`：默认 `4`，至少需要的中文字符数。
+
+### 4) 阶段内并发搜索（可配置）
 
 - `ENABLE_PARALLEL_SEARCH`：是否启用同阶段 provider 并发检索（默认 `true`）。
 - `SEARCH_WORKERS`：并发线程数（默认 `6`）。
@@ -125,6 +134,8 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 
 ## 更新记录（近期）
 
+- `v0.2.7`：进一步收紧剧集匹配规则：`tv` 查询新增标题重叠保护（弱季包候选需具备更可信标题相关性），降低“剧集格式正确但剧名不相关”的误命中。
+- `v0.2.6`：新增“字幕内容级中文置信度校验”（基于对话行占比与中英字符占比），并强化 `movie/tv` 媒体类型强约束，解决电影/剧集候选混入问题。
 - `v0.2.5`：参考 ChineseSubFinder 的候选过滤思路，新增标题词元重叠评分（含中文词元），并在电影请求中拒绝“中文标题零重叠”的误匹配候选，显著降低电影/剧集同名干扰。
 - `v0.2.4`：Docker 镜像补齐 `bsdtar` 依赖（`libarchive-tools`），修复 RAR 字幕包在容器内无法解压导致的下载失败。
 - `v0.2.3`：增强电影/剧集候选区分（电影请求会过滤明显剧集整季包），并在直连下载失败时明确提示已尝试 fallback 源但未命中可下载中文字幕。

@@ -177,6 +177,61 @@ def test_download_to_disk_skips_english_candidate_and_uses_chinese_alternative(t
     assert "你好".encode("utf-8") in content
 
 
+def test_download_rejects_sparse_chinese_and_uses_better_candidate(tmp_path):
+    sparse = (
+        "1\n00:00:00,000 --> 00:00:01,000\nHello from the archive candidate.\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nStill English lines only.\n"
+        "3\n00:00:02,000 --> 00:00:03,000\nAnother English line.\n"
+        "4\n00:00:03,000 --> 00:00:04,000\n这条仅用于误导\n"
+    ).encode("utf-8")
+    provider = FakeChineseProvider(
+        [
+            make_candidate(subtitle_id="s-sparse", score=220),
+            make_candidate(subtitle_id="s-zh", score=120),
+        ],
+        content_by_subtitle_id={
+            "s-sparse": sparse,
+            "s-zh": (
+                "1\n00:00:00,000 --> 00:00:01,000\n你好，医生。\n"
+                "2\n00:00:01,000 --> 00:00:02,000\n今天情况怎么样？\n"
+            ).encode("utf-8"),
+        },
+    )
+    service = SubtitleService(settings=_settings(tmp_path), chinese_provider=provider)
+
+    result = service.search(
+        SearchRequest(
+            title="匹兹堡医护前线",
+            media_type="tv",
+            season=2,
+            episode=5,
+            languages=["zh-cn", "zh-tw"],
+            limit=1,
+        )
+    )
+
+    token = result.items[0].token
+    downloaded = service.download_to_disk(token)
+
+    assert downloaded.subtitle_id == "s-zh"
+    content = tmp_path.joinpath(downloaded.filename).read_bytes()
+    assert "你好".encode("utf-8") in content
+
+
+def test_chinese_confidence_accepts_bilingual_content(tmp_path):
+    provider = FakeChineseProvider([make_candidate(subtitle_id="s-1", score=88)])
+    service = SubtitleService(settings=_settings(tmp_path), chinese_provider=provider)
+
+    content = (
+        "1\n00:00:00,000 --> 00:00:02,000\n你好，医生。 Hello doctor.\n"
+        "2\n00:00:02,000 --> 00:00:04,000\n我们继续。 Let's continue.\n"
+    ).encode("utf-8")
+    passed, confidence = service._verify_chinese_content(content)
+
+    assert passed is True
+    assert confidence.score >= service._settings.chinese_confidence_threshold
+
+
 def test_download_to_disk_raises_when_all_candidates_are_non_chinese(tmp_path):
     provider = FakeChineseProvider(
         [make_candidate(subtitle_id="s-en", score=88)],

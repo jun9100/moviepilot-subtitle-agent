@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.2.5"
+    app_version: str = "0.2.7"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     user_agent: str = "MoviePilotSubtitleAgent/0.2"
     subtitle_output_dir: Path = Path("data/subtitles")
     allow_season_pack_for_episode: bool = True
+    strict_media_type_filter: bool = True
+    enable_content_language_validation: bool = True
+    chinese_confidence_threshold: float = 0.25
+    chinese_confidence_min_chars: int = 4
 
     addic7ed_username: str | None = None
     addic7ed_password: str | None = None
@@ -70,6 +74,28 @@ class Settings(BaseSettings):
             parsed = int(value)
         except (TypeError, ValueError):
             return 6
+        return max(1, parsed)
+
+    @field_validator("chinese_confidence_threshold", mode="before")
+    @classmethod
+    def normalize_chinese_confidence_threshold(cls, value: Any) -> float:
+        if value is None:
+            return 0.25
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 0.25
+        return min(1.0, max(0.0, parsed))
+
+    @field_validator("chinese_confidence_min_chars", mode="before")
+    @classmethod
+    def normalize_chinese_confidence_min_chars(cls, value: Any) -> int:
+        if value is None:
+            return 4
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 4
         return max(1, parsed)
 
     @property

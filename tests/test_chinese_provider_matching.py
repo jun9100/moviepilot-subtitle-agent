@@ -180,6 +180,87 @@ def test_subhdtw_season_level_candidate_can_be_used_for_episode_query():
     assert _provider()._candidate_matches_query(candidate, subhd_query) is True
 
 
+def test_tv_query_rejects_movie_like_candidate_without_episode_markers():
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="N2tccz",
+        title="国宝",
+        release_name="国宝.Kokuho.2025.1080p.WEBRip.x264.AAC.2.0-CabPro",
+        language="zh-cn",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/N2tccz",
+        page_link="https://subhd.tv/a/N2tccz",
+        language_tags=["zh-cn"],
+        matches=["resolution"],
+        score=0,
+    )
+    tv_query = SearchRequest(
+        title="国宝",
+        media_type="tv",
+        year=2025,
+        season=1,
+        episode=1,
+        languages=["zh-cn", "zh-tw"],
+        limit=10,
+    )
+
+    assert _provider()._candidate_matches_query(candidate, tv_query) is False
+
+
+def test_tv_query_rejects_unrelated_season_only_candidate_with_low_overlap():
+    candidate = DirectSubtitleCandidate(
+        provider="assrt",
+        subtitle_id="assrt-s01-only",
+        title="Our Unwritten Seoul",
+        release_name="Our.Unwritten.Seoul.S01.720p.WEB.Korean.H264-JFF",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://assrt.net/download/123/demo.zip",
+        page_link="https://assrt.net/xml/sub/123/123.xml",
+        language_tags=["zh-cn", "zh-tw"],
+        matches=[],
+        score=0,
+    )
+    tv_query = SearchRequest(
+        title="国宝",
+        media_type="tv",
+        year=2025,
+        season=1,
+        episode=1,
+        languages=["zh-cn", "zh-tw"],
+        limit=10,
+    )
+
+    assert _provider()._candidate_matches_query(candidate, tv_query) is False
+
+
+def test_tv_query_keeps_exact_episode_candidate_even_when_title_is_english():
+    candidate = DirectSubtitleCandidate(
+        provider="assrt",
+        subtitle_id="assrt-s01e03",
+        title="Life's Punchline",
+        release_name="Life.s.Punchline.S01E03.1080p.WEB-DL",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://assrt.net/download/456/demo.srt",
+        page_link="https://assrt.net/xml/sub/456/456.xml",
+        language_tags=["zh-cn", "zh-tw"],
+        matches=[],
+        score=0,
+    )
+    tv_query = SearchRequest(
+        title="短剧开始啦",
+        media_type="tv",
+        year=2021,
+        season=1,
+        episode=3,
+        languages=["zh-cn", "zh-tw"],
+        limit=10,
+    )
+
+    assert _provider()._candidate_matches_query(candidate, tv_query) is True
+
+
 def test_search_ignores_assrt_errors_and_returns_empty(monkeypatch):
     provider = _provider()
 

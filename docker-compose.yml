@@ -1,12 +1,12 @@
 services:
   subtitle-agent:
-    image: jun9100/moviepilot-subtitle-agent:v0.2.5
+    image: jun9100/moviepilot-subtitle-agent:v0.2.7
     container_name: moviepilot-subtitle-agent
     ports:
       - "8178:8178"
     environment:
       APP_NAME: "MoviePilot Subtitle Agent"
-      APP_VERSION: "0.2.5"
+      APP_VERSION: "0.2.7"
       HOST: "0.0.0.0"
       PORT: "8178"
       DEBUG: "false"
@@ -25,6 +25,10 @@ services:
       SUBTITLE_OUTPUT_DIR: "data/subtitles"
       USER_AGENT: "MoviePilotSubtitleAgent/0.2"
       ALLOW_SEASON_PACK_FOR_EPISODE: "true"
+      STRICT_MEDIA_TYPE_FILTER: "true"
+      ENABLE_CONTENT_LANGUAGE_VALIDATION: "true"
+      CHINESE_CONFIDENCE_THRESHOLD: "0.25"
+      CHINESE_CONFIDENCE_MIN_CHARS: "4"
 
       HTTP_PROXY: "http://<proxy-host>:999"
       HTTPS_PROXY: "http://<proxy-host>:999"

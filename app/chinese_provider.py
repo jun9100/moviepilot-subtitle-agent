@@ -84,9 +84,11 @@ class ChineseSubtitleProvider:
         timeout_seconds: int = 20,
         user_agent: str = "MoviePilotSubtitleAgent/0.2",
         allow_season_pack_for_episode: bool = True,
+        strict_media_type_filter: bool = True,
     ) -> None:
         self._timeout = timeout_seconds
         self._allow_season_pack_for_episode = allow_season_pack_for_episode
+        self._strict_media_type_filter = strict_media_type_filter
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -650,6 +652,54 @@ class ChineseSubtitleProvider:
         if query.media_type == "tv":
             season_episode = self._extract_season_episode(merged)
             season_only = self._extract_season(merged)
+            episode = self._extract_episode_from_text(merged)
+            episode_range = self._extract_episode_range(merged)
+            episode_upper_bound = self._extract_episode_upper_bound(merged)
+            season_pack = self._looks_like_season_pack(candidate, query=query)
+            title_overlap = self._title_overlap_score(query.title, merged)
+            chinese_overlap = self._chinese_overlap_score(query.title, merged)
+
+            has_tv_markers = bool(
+                season_episode
+                or season_only is not None
+                or episode is not None
+                or episode_range
+                or episode_upper_bound is not None
+                or season_pack
+            )
+            if self._strict_media_type_filter and query.season and query.episode and not has_tv_markers:
+                # Strict tv-mode should not accept movie-like candidates with no season/episode signals.
+                return False
+
+            if self._strict_media_type_filter:
+                has_strong_episode_signal = False
+                if season_episode:
+                    has_strong_episode_signal = (
+                        (not query.season or season_episode[0] == query.season)
+                        and (not query.episode or season_episode[1] == query.episode)
+                    )
+                elif query.episode:
+                    if episode is not None and episode == query.episode:
+                        has_strong_episode_signal = True
+                    elif episode_range and episode_range[0] <= query.episode <= episode_range[1]:
+                        has_strong_episode_signal = True
+                    elif episode_upper_bound is not None and query.episode <= episode_upper_bound:
+                        has_strong_episode_signal = True
+
+                # If both sides have Chinese words but no overlap, it's very likely another show.
+                # Skip this rule for Japanese-title queries (kana + kanji mix).
+                if chinese_overlap == 0.0 and not self._contains_japanese_kana(query.title):
+                    return False
+
+                # For CJK queries, reject weak season-only hits with no title overlap.
+                if (
+                    self._contains_cjk(query.title)
+                    and title_overlap < 0.08
+                    and not has_strong_episode_signal
+                    and not season_pack
+                ):
+                    return False
+
             if query.season and season_only and season_only != query.season:
                 return False
 
@@ -659,10 +709,6 @@ class ChineseSubtitleProvider:
                     if season != query.season or episode != query.episode:
                         return False
                 else:
-                    episode = self._extract_episode_from_text(merged)
-                    episode_range = self._extract_episode_range(merged)
-                    episode_upper_bound = self._extract_episode_upper_bound(merged)
-
                     if episode is not None and episode != query.episode:
                         return False
                     if episode_range and not (episode_range[0] <= query.episode <= episode_range[1]):
@@ -676,7 +722,7 @@ class ChineseSubtitleProvider:
                         and episode_upper_bound is None
                         and not (
                             self._allow_season_pack_for_episode
-                            and self._looks_like_season_pack(candidate, query=query)
+                            and season_pack
                         )
                     ):
                         # Episodic requests should avoid ambiguous single-file subtitles.
@@ -777,10 +823,10 @@ class ChineseSubtitleProvider:
                 return int(match.group(1))
         return None
 
-    @staticmethod
-    def _looks_like_season_pack(candidate: DirectSubtitleCandidate, *, query: SearchRequest) -> bool:
+    @classmethod
+    def _looks_like_season_pack(cls, candidate: DirectSubtitleCandidate, *, query: SearchRequest) -> bool:
         merged = f"{candidate.title} {candidate.release_name}"
-        season = ChineseSubtitleProvider._extract_season(merged)
+        season = cls._extract_season(merged)
         if query.season and season and season != query.season:
             return False
 
@@ -788,22 +834,25 @@ class ChineseSubtitleProvider:
         if ext not in {".zip", ".rar"} and candidate.provider not in {"subhd", "subhdtw"}:
             return False
 
-        episode = ChineseSubtitleProvider._extract_episode_from_text(merged)
+        episode = cls._extract_episode_from_text(merged)
+        episode_range = cls._extract_episode_range(merged)
+        upper_bound = cls._extract_episode_upper_bound(merged)
+        has_pack_marker = cls._has_tv_pack_marker(merged)
+
+        # Hard guard: prevent movie-like candidates (no tv markers) from being treated as season packs.
+        if episode is None and not episode_range and upper_bound is None and season is None and not has_pack_marker:
+            return False
+
         if episode is not None and query.episode and episode == query.episode:
             return True
 
-        episode_range = ChineseSubtitleProvider._extract_episode_range(merged)
         if episode_range and query.episode and episode_range[0] <= query.episode <= episode_range[1]:
             return True
 
-        upper_bound = ChineseSubtitleProvider._extract_episode_upper_bound(merged)
         if upper_bound is not None and query.episode and query.episode <= upper_bound:
             return True
 
-        if re.search(
-            r"(?i)\b(complete|全集|合集|全季|全\d+集|season\s*\d+\s*complete|s\d{1,2}\s*complete)\b",
-            merged,
-        ):
+        if has_pack_marker:
             return True
 
         # Conservative fallback: require obvious title overlap to avoid cross-show mismatch.
@@ -815,6 +864,15 @@ class ChineseSubtitleProvider:
                 return True
 
         return False
+
+    @staticmethod
+    def _has_tv_pack_marker(text: str) -> bool:
+        return bool(
+            re.search(
+                r"(?i)\b(complete|全集|合集|全季|全\d+集|season\s*\d+\s*complete|s\d{1,2}\s*complete|更新至)\b",
+                text,
+            )
+        )
 
     @staticmethod
     def _looks_like_tv_candidate(text: str) -> bool:
@@ -959,6 +1017,10 @@ class ChineseSubtitleProvider:
     @staticmethod
     def _contains_cjk(text: str) -> bool:
         return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+    @staticmethod
+    def _contains_japanese_kana(text: str) -> bool:
+        return bool(re.search(r"[\u3040-\u30ff]", text or ""))
 
     @staticmethod
     def _normalize_title_text(text: str) -> str:
