@@ -212,12 +212,76 @@ class SubtitleService:
                 filename=filename,
             )
 
+        if self._settings.enable_subliminal_fallback:
+            try:
+                fallback_subtitle = self._fetch_with_subliminal_fallback(
+                    query=query,
+                    filename=filename,
+                    requires_chinese=requires_chinese,
+                )
+            except Exception as exc:
+                if last_error:
+                    raise SubtitleDownloadError(
+                        f"failed to get verified Chinese subtitle from direct candidates: {last_error}; "
+                        f"subliminal fallback failed: {exc}"
+                    ) from exc
+                raise SubtitleDownloadError(f"subliminal fallback failed: {exc}") from exc
+
+            if fallback_subtitle is not None:
+                return fallback_subtitle
+
         if last_error:
             raise SubtitleDownloadError(
                 f"failed to get verified Chinese subtitle from direct candidates: {last_error}"
             ) from last_error
 
         raise SubtitleDownloadError("failed to get verified Chinese subtitle from direct candidates")
+
+    def _fetch_with_subliminal_fallback(
+        self,
+        *,
+        query: SearchRequest,
+        filename: str | None,
+        requires_chinese: bool,
+    ) -> InMemorySubtitle | None:
+        provider_groups = [
+            self._settings.non_opensubtitles_fallback_provider_list,
+            self._settings.opensubtitles_fallback_provider_list,
+        ]
+        download_error: Exception | None = None
+        search_error: Exception | None = None
+
+        for providers in provider_groups:
+            if not providers:
+                continue
+
+            try:
+                items = self._search_with_subliminal_providers(query=query, providers=providers)
+            except Exception as exc:
+                search_error = exc
+                continue
+
+            items.sort(key=lambda item: item.score, reverse=True)
+            for item in items:
+                try:
+                    fetched = self.fetch_to_memory(item.token, filename=filename)
+                except Exception as exc:
+                    download_error = exc
+                    continue
+
+                if requires_chinese and not self._content_has_chinese_text(fetched.content):
+                    download_error = SubtitleDownloadError(
+                        "downloaded fallback subtitle content does not contain Chinese text"
+                    )
+                    continue
+
+                return fetched
+
+        if download_error is not None:
+            raise SubtitleDownloadError(str(download_error)) from download_error
+        if search_error is not None:
+            raise SubtitleDownloadError(str(search_error)) from search_error
+        return None
 
     def _fetch_subliminal_subtitle(
         self,

@@ -8,9 +8,36 @@ import pytest
 from app.config import Settings
 from app.errors import SubtitleDownloadError, SubtitleNotFoundError
 from app.models import SearchRequest, SubtitleSearchItem
-from app.service import SubtitleService
+from app.service import CachedSubtitle, SubtitleService
 
 from .fakes import FakeChineseProvider, make_candidate
+
+
+class _FakeSubliminalSubtitle:
+    provider_name = "podnapisi"
+    id = "fallback-1"
+    subtitle_format = "srt"
+    language = "zh"
+    content: bytes | None = None
+
+    @staticmethod
+    def get_matches(_video):
+        return set()
+
+
+class _FakeBackend:
+    @staticmethod
+    def list_subtitles(*args, **kwargs):
+        return {}
+
+    @staticmethod
+    def download_subtitles(subtitles, *, providers, provider_configs):
+        for subtitle in subtitles:
+            subtitle.content = "1\n00:00:00,000 --> 00:00:01,000\n回退中文字幕\n".encode("utf-8")
+
+    @staticmethod
+    def compute_score(*args, **kwargs):
+        return 88
 
 
 def _settings(tmp_path):
@@ -19,6 +46,7 @@ def _settings(tmp_path):
         default_languages="zh-cn,zh-tw",
         subtitle_output_dir=tmp_path,
         token_ttl_seconds=3600,
+        enable_subliminal_fallback=False,
     )
 
 
@@ -251,3 +279,69 @@ def test_search_stops_before_opensubtitles_when_secondary_has_results(tmp_path):
     assert result.total == 1
     assert result.items[0].provider == "podnapisi"
     assert calls == [["podnapisi", "tvsubtitles"]]
+
+
+def test_download_uses_subliminal_fallback_when_direct_candidates_fail(tmp_path):
+    provider = FakeChineseProvider(
+        [make_candidate(subtitle_id="s-direct", score=88)],
+        content_by_subtitle_id={
+            "s-direct": "1\n00:00:00,000 --> 00:00:01,000\nHello, doctor.\n".encode("utf-16"),
+        },
+    )
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="assrt,subhd",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            token_ttl_seconds=3600,
+            enable_subliminal_fallback=True,
+            subliminal_fallback_providers="podnapisi,tvsubtitles,opensubtitlescom,opensubtitles",
+        ),
+        backend=_FakeBackend(),
+        chinese_provider=provider,
+    )
+
+    def fake_search_with_subliminal(self, *, query, providers):
+        subtitle = _FakeSubliminalSubtitle()
+        token = "fallback-token"
+        with self._lock:
+            self._cache[token] = CachedSubtitle(
+                kind="subliminal",
+                payload=subtitle,
+                query=query,
+                created_at=self._now_fn(),
+            )
+        return [
+            SubtitleSearchItem(
+                token=token,
+                provider="podnapisi",
+                subtitle_id="fallback-1",
+                title=query.title,
+                language="zh",
+                score=88,
+                matches=[],
+                hearing_impaired=None,
+                page_link=None,
+                subtitle_format="srt",
+                download_url=f"/api/v1/subtitles/fetch/{token}",
+            )
+        ]
+
+    service._search_with_subliminal_providers = types.MethodType(fake_search_with_subliminal, service)
+
+    search_result = service.search(
+        SearchRequest(
+            title="短剧开始啦",
+            media_type="tv",
+            season=1,
+            episode=3,
+            languages=["zh-cn", "zh-tw"],
+            limit=5,
+        )
+    )
+    token = search_result.items[0].token
+    downloaded = service.download_to_disk(token)
+
+    assert downloaded.provider == "podnapisi"
+    content = tmp_path.joinpath(downloaded.filename).read_bytes()
+    assert "回退中文字幕".encode("utf-8") in content

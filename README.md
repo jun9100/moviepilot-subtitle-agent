@@ -98,6 +98,7 @@ environment:
 
 ## 更新记录（近期）
 
+- `v0.1.8`：当 `assrt/subhd` 直连下载失败（含 `subhd` 验证码拦截）时，自动继续使用 fallback 下载链路（`podnapisi/tvsubtitles/opensubtitles`）。
 - `v0.1.7`：`subhd` 升级为真实下载源（不再仅作提示词扩展），可直接下载并参与候选排序。
 - `v0.1.6`：修复 `assrt` 网络/SSL 异常导致整次搜索失败的问题，失败时自动继续后续源与 fallback。
 - `v0.1.5`：新增分层多源策略（`assrt/subhd` 后自动尝试 `podnapisi/tvsubtitles`，最后才用 OpenSubtitles）。
