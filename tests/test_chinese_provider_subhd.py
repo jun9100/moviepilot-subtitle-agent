@@ -287,3 +287,39 @@ def test_subhd_captcha_cooldown_avoids_repeated_attempts(monkeypatch):
 
     # second call should be blocked by cooldown before touching mirrors again
     assert len(calls) == first_attempt_calls
+
+
+def test_subhd_cookiecloud_auto_sync_to_mirrors(monkeypatch):
+    calls: list[tuple[str, dict | None]] = []
+
+    def fake_post(self, url, *args, **kwargs):
+        calls.append((url, kwargs.get("json")))
+        return _FakeResponse(
+            status_code=200,
+            json_data={
+                "cookie_data": {
+                    "subhd.tv": [
+                        {"name": "cf_clearance", "value": "demo_token", "domain": ".subhd.tv"},
+                        {"name": "sessionid", "value": "abc123", "domain": ".subhd.tv"},
+                    ],
+                    "example.com": [
+                        {"name": "sid", "value": "ignore", "domain": ".example.com"},
+                    ],
+                }
+            },
+        )
+
+    monkeypatch.setattr("app.chinese_provider.requests.Session.post", fake_post)
+
+    provider = ChineseSubtitleProvider(
+        timeout_seconds=5,
+        subhd_cookiecloud_url="https://mp.fansoar.com/cookiecloud",
+        subhd_cookiecloud_key="demo_key",
+        subhd_cookiecloud_password="demo_pwd",
+        subhd_cookiecloud_sync_interval_seconds=0,
+    )
+
+    assert calls == [("https://mp.fansoar.com/cookiecloud/get/demo_key", {"password": "demo_pwd"})]
+    for domain in SUBHD_MIRRORS:
+        assert provider._session.cookies.get("cf_clearance", domain=domain) == "demo_token"
+        assert provider._session.cookies.get("sessionid", domain=domain) == "abc123"

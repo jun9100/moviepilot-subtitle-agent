@@ -69,6 +69,10 @@ class SubtitleService:
             subhd_captcha_cooldown_seconds=settings.subhd_captcha_cooldown_seconds,
             subhd_cookie_string=settings.subhd_cookie_string,
             subhd_cookie_file=settings.subhd_cookie_file,
+            subhd_cookiecloud_url=settings.subhd_cookiecloud_url,
+            subhd_cookiecloud_key=settings.subhd_cookiecloud_key,
+            subhd_cookiecloud_password=settings.subhd_cookiecloud_password,
+            subhd_cookiecloud_sync_interval_seconds=settings.subhd_cookiecloud_sync_interval_seconds,
         )
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._lock = threading.RLock()

@@ -74,6 +74,11 @@ def create_app(
             "enable_content_language_validation": settings_state.enable_content_language_validation,
             "chinese_confidence_threshold": settings_state.chinese_confidence_threshold,
             "chinese_confidence_min_chars": settings_state.chinese_confidence_min_chars,
+            "subhd_cookiecloud_enabled": bool(
+                (settings_state.subhd_cookiecloud_url or "").strip()
+                and (settings_state.subhd_cookiecloud_key or "").strip()
+                and (settings_state.subhd_cookiecloud_password or "").strip()
+            ),
             "default_languages": settings_state.language_list,
         }
 

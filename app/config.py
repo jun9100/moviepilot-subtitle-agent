@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.2.9"
+    app_version: str = "0.2.10"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     subhd_captcha_cooldown_seconds: int = 1800
     subhd_cookie_string: str | None = None
     subhd_cookie_file: str | None = None
+    subhd_cookiecloud_url: str | None = None
+    subhd_cookiecloud_key: str | None = None
+    subhd_cookiecloud_password: str | None = None
+    subhd_cookiecloud_sync_interval_seconds: int = 1800
 
     addic7ed_username: str | None = None
     addic7ed_password: str | None = None
@@ -104,6 +108,17 @@ class Settings(BaseSettings):
     @field_validator("subhd_captcha_cooldown_seconds", mode="before")
     @classmethod
     def normalize_subhd_captcha_cooldown_seconds(cls, value: Any) -> int:
+        if value is None:
+            return 1800
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 1800
+        return max(0, parsed)
+
+    @field_validator("subhd_cookiecloud_sync_interval_seconds", mode="before")
+    @classmethod
+    def normalize_subhd_cookiecloud_sync_interval_seconds(cls, value: Any) -> int:
         if value is None:
             return 1800
         try:

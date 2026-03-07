@@ -9,7 +9,7 @@ import zipfile
 from dataclasses import dataclass, field
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 from urllib.parse import quote, urljoin, urlparse
 
 import requests
@@ -92,12 +92,21 @@ class ChineseSubtitleProvider:
         subhd_captcha_cooldown_seconds: int = 1800,
         subhd_cookie_string: str | None = None,
         subhd_cookie_file: str | None = None,
+        subhd_cookiecloud_url: str | None = None,
+        subhd_cookiecloud_key: str | None = None,
+        subhd_cookiecloud_password: str | None = None,
+        subhd_cookiecloud_sync_interval_seconds: int = 1800,
     ) -> None:
         self._timeout = timeout_seconds
         self._allow_season_pack_for_episode = allow_season_pack_for_episode
         self._strict_media_type_filter = strict_media_type_filter
         self._subhd_captcha_cooldown_seconds = max(0, int(subhd_captcha_cooldown_seconds or 0))
         self._subhd_domain_cooldown_until: dict[str, float] = {}
+        self._subhd_cookiecloud_url = str(subhd_cookiecloud_url or "").strip().rstrip("/")
+        self._subhd_cookiecloud_key = str(subhd_cookiecloud_key or "").strip()
+        self._subhd_cookiecloud_password = str(subhd_cookiecloud_password or "").strip()
+        self._subhd_cookiecloud_sync_interval_seconds = max(0, int(subhd_cookiecloud_sync_interval_seconds or 0))
+        self._subhd_cookiecloud_last_sync_at = 0.0
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -106,6 +115,7 @@ class ChineseSubtitleProvider:
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             }
         )
+        self._sync_subhd_cookies_from_cookiecloud(force=True)
         self._apply_subhd_cookies(cookie_string=subhd_cookie_string, cookie_file=subhd_cookie_file)
 
     def search(self, query: SearchRequest, *, providers: list[str]) -> list[DirectSubtitleCandidate]:
@@ -176,6 +186,7 @@ class ChineseSubtitleProvider:
         )
 
     def _download_subhd(self, candidate: DirectSubtitleCandidate, *, query: SearchRequest) -> DownloadedSubtitle:
+        self._sync_subhd_cookies_from_cookiecloud(force=False)
         sid = (candidate.subtitle_id or "").strip()
         if not sid or sid == "unknown":
             sid = self._extract_subhd_id(candidate.page_link or candidate.download_url)
@@ -211,6 +222,19 @@ class ChineseSubtitleProvider:
                 break
 
         if captcha_encountered:
+            if self._sync_subhd_cookies_from_cookiecloud(force=True):
+                self._subhd_domain_cooldown_until.clear()
+                refreshed_domains = self._subhd_domain_order(candidate)
+                for domain in refreshed_domains:
+                    try:
+                        return self._download_subhd_from_domain(
+                            domain=domain,
+                            sid=sid,
+                            candidate=candidate,
+                            query=query,
+                        )
+                    except Exception as exc:
+                        last_error = exc
             raise SubtitleDownloadError("subhd mirrors require captcha verification, cannot auto-download")
         if last_error:
             raise SubtitleDownloadError(f"subhd download failed on all mirrors: {last_error}") from last_error
@@ -378,6 +402,96 @@ class ChineseSubtitleProvider:
 
         if loaded:
             logger.info("loaded %d subhd cookie entries", loaded)
+
+    def _sync_subhd_cookies_from_cookiecloud(self, *, force: bool) -> bool:
+        if not (self._subhd_cookiecloud_url and self._subhd_cookiecloud_key and self._subhd_cookiecloud_password):
+            return False
+
+        now = time.monotonic()
+        interval = self._subhd_cookiecloud_sync_interval_seconds
+        if not force and interval > 0 and (now - self._subhd_cookiecloud_last_sync_at) < interval:
+            return False
+
+        self._subhd_cookiecloud_last_sync_at = now
+        cookie_string = self._fetch_subhd_cookie_string_from_cookiecloud()
+        if not cookie_string:
+            return False
+
+        self._apply_subhd_cookies(cookie_string=cookie_string, cookie_file=None)
+        logger.info("synced subhd cookies from cookiecloud")
+        return True
+
+    def _fetch_subhd_cookie_string_from_cookiecloud(self) -> str:
+        endpoint = urljoin(f"{self._subhd_cookiecloud_url}/", f"get/{self._subhd_cookiecloud_key}")
+        try:
+            response = self._session.post(
+                endpoint,
+                json={"password": self._subhd_cookiecloud_password},
+                timeout=self._timeout,
+                allow_redirects=True,
+            )
+        except Exception as exc:
+            logger.warning("cookiecloud request failed: %s", exc)
+            return ""
+
+        if response.status_code != 200:
+            logger.warning("cookiecloud request returned status %s", response.status_code)
+            return ""
+
+        try:
+            payload: Any = response.json()
+        except Exception as exc:
+            logger.warning("cookiecloud response decode failed: %s", exc)
+            return ""
+
+        cookie_data: Any
+        if isinstance(payload, dict) and "cookie_data" in payload and isinstance(payload.get("cookie_data"), dict):
+            cookie_data = payload.get("cookie_data")
+        else:
+            cookie_data = payload
+
+        if not isinstance(cookie_data, dict):
+            logger.warning("cookiecloud payload format is not supported")
+            return ""
+
+        merged: dict[str, str] = {}
+        for domain, raw_item in cookie_data.items():
+            domain_text = str(domain or "").lstrip(".").lower()
+            if not self._is_subhd_domain(domain_text):
+                continue
+
+            if isinstance(raw_item, str):
+                for part in [item.strip() for item in raw_item.split(";") if "=" in item]:
+                    name, value = part.split("=", 1)
+                    name = name.strip()
+                    value = value.strip()
+                    if name:
+                        merged[name] = value
+                continue
+
+            if not isinstance(raw_item, list):
+                continue
+
+            for cookie in raw_item:
+                if not isinstance(cookie, dict):
+                    continue
+                name = str(cookie.get("name") or "").strip()
+                value = str(cookie.get("value") or "").strip()
+                cookie_domain = str(cookie.get("domain") or "").lstrip(".").lower()
+                if not name:
+                    continue
+                if cookie_domain and not self._is_subhd_domain(cookie_domain):
+                    continue
+                merged[name] = value
+
+        return "; ".join(f"{name}={value}" for name, value in merged.items())
+
+    @staticmethod
+    def _is_subhd_domain(domain: str) -> bool:
+        text = str(domain or "").lstrip(".").lower()
+        if not text:
+            return False
+        return any(text == mirror or text.endswith(f".{mirror}") for mirror in SUBHD_MIRRORS)
 
     def _mark_subhd_domain_cooldown(self, domain: str) -> None:
         if self._subhd_captcha_cooldown_seconds <= 0:
