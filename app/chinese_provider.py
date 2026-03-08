@@ -208,6 +208,8 @@ class ChineseSubtitleProvider:
 
     def get_captcha_image(self, challenge_id: str) -> tuple[bytes, str]:
         challenge = self._get_captcha_challenge(challenge_id)
+        if not challenge.image_content:
+            raise SubtitleNotFoundError("captcha image unavailable, please refresh challenge")
         return challenge.image_content, challenge.image_content_type
 
     def solve_captcha(self, challenge_id: str, *, code: str) -> tuple[DownloadedSubtitle, DirectSubtitleCandidate, SearchRequest]:
@@ -701,8 +703,7 @@ class ChineseSubtitleProvider:
         *,
         captcha_payload: dict[str, Any] | None = None,
     ) -> SubhdCaptchaChallenge:
-        html = ""
-        if captcha_payload is None:
+        def _fetch_down_page_html() -> str:
             try:
                 response = self._session.get(
                     challenge.down_page_url,
@@ -713,9 +714,9 @@ class ChineseSubtitleProvider:
                         "User-Agent": self._session.headers.get("User-Agent", "MoviePilotSubtitleAgent/0.2"),
                     },
                 )
-                html = response.text if response.status_code == 200 else ""
+                return response.text if response.status_code == 200 else ""
             except Exception:
-                html = ""
+                return ""
 
         refreshed = self._create_captcha_challenge(
             domain=challenge.domain,
@@ -724,9 +725,34 @@ class ChineseSubtitleProvider:
             query=challenge.query,
             detail_url=challenge.detail_url,
             down_page_url=challenge.down_page_url,
-            html=html,
+            html="",
             captcha_payload=captcha_payload,
         )
+
+        # Some subhd refresh payloads contain neither SVG nor usable image URL.
+        # Retry from down page HTML to avoid generating an empty captcha image endpoint.
+        if not refreshed.image_content:
+            fallback_html = _fetch_down_page_html()
+            if fallback_html:
+                fallback = self._create_captcha_challenge(
+                    domain=challenge.domain,
+                    sid=challenge.subtitle_id,
+                    candidate=challenge.candidate,
+                    query=challenge.query,
+                    detail_url=challenge.detail_url,
+                    down_page_url=challenge.down_page_url,
+                    html=fallback_html,
+                    captcha_payload=None,
+                )
+                self._remove_captcha_challenge(refreshed.challenge_id)
+                refreshed = fallback
+
+        # Last-resort fallback: keep previous image instead of returning 200 with empty body.
+        if not refreshed.image_content and challenge.image_content:
+            refreshed.image_content = challenge.image_content
+            refreshed.image_content_type = challenge.image_content_type
+            refreshed.image_path = challenge.image_path
+
         self._remove_captcha_challenge(challenge.challenge_id)
         return refreshed
 
