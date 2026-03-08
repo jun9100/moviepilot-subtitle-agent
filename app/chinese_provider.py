@@ -4,6 +4,7 @@ import logging
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -11,11 +12,12 @@ from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import quote, urljoin, urlparse
+from uuid import uuid4
 
 import requests
 from bs4 import BeautifulSoup
 
-from .errors import SubtitleDownloadError
+from .errors import SubtitleCaptchaError, SubtitleDownloadError, SubtitleNotFoundError
 from .models import SearchRequest
 
 
@@ -73,6 +75,22 @@ class DownloadedSubtitle:
     filename: str | None = None
 
 
+@dataclass
+class SubhdCaptchaChallenge:
+    challenge_id: str
+    provider: str
+    subtitle_id: str
+    domain: str
+    detail_url: str
+    down_page_url: str
+    image_content: bytes
+    image_content_type: str
+    image_path: str
+    candidate: DirectSubtitleCandidate
+    query: SearchRequest
+    created_at_monotonic: float
+
+
 class ChineseSubtitleProvider:
     """
     Chinese subtitle provider chain used to补齐 OpenSubtitles 缺失场景。
@@ -107,6 +125,9 @@ class ChineseSubtitleProvider:
         self._cookiecloud_password = str(cookiecloud_password or "").strip()
         self._cookiecloud_sync_interval_seconds = max(0, int(cookiecloud_sync_interval_seconds or 0))
         self._cookiecloud_last_sync_at = 0.0
+        self._captcha_challenge_ttl_seconds = max(300, self._subhd_captcha_cooldown_seconds or 1800)
+        self._captcha_lock = threading.RLock()
+        self._captcha_challenges: dict[str, SubhdCaptchaChallenge] = {}
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -185,6 +206,43 @@ class ChineseSubtitleProvider:
             content_disposition=response.headers.get("Content-Disposition"),
         )
 
+    def get_captcha_image(self, challenge_id: str) -> tuple[bytes, str]:
+        challenge = self._get_captcha_challenge(challenge_id)
+        return challenge.image_content, challenge.image_content_type
+
+    def solve_captcha(self, challenge_id: str, *, code: str) -> tuple[DownloadedSubtitle, DirectSubtitleCandidate, SearchRequest]:
+        challenge = self._get_captcha_challenge(challenge_id)
+        captcha_code = str(code or "").strip()
+        if not captcha_code:
+            raise SubtitleCaptchaError("captcha code is required", data=self._captcha_error_data(challenge))
+
+        payload = self._request_subhd_download_payload(
+            domain=challenge.domain,
+            sid=challenge.subtitle_id,
+            detail_url=challenge.detail_url,
+            down_page_url=challenge.down_page_url,
+            captcha_code=captcha_code,
+        )
+
+        if payload.get("pass") is False or payload.get("success") is not True:
+            refreshed = self._refresh_captcha_challenge(
+                challenge,
+                captcha_payload=payload,
+            )
+            message = str(payload.get("msg") or "subhd captcha validation failed")
+            raise SubtitleCaptchaError(message, data=self._captcha_error_data(refreshed))
+
+        downloaded = self._download_subhd_file_from_payload(
+            payload=payload,
+            domain=challenge.domain,
+            down_page_url=challenge.down_page_url,
+            candidate=challenge.candidate,
+            query=challenge.query,
+        )
+
+        self._remove_captcha_challenge(challenge.challenge_id)
+        return downloaded, challenge.candidate, challenge.query
+
     def _download_subhd(self, candidate: DirectSubtitleCandidate, *, query: SearchRequest) -> DownloadedSubtitle:
         self._sync_subhd_cookies_from_cookiecloud(force=False)
         sid = (candidate.subtitle_id or "").strip()
@@ -200,6 +258,7 @@ class ChineseSubtitleProvider:
 
         last_error: Exception | None = None
         captcha_encountered = False
+        captcha_error: SubtitleCaptchaError | None = None
 
         for _ in range(2):
             attempted = False
@@ -218,6 +277,8 @@ class ChineseSubtitleProvider:
                     last_error = exc
                     if "captcha" in str(exc).lower():
                         captcha_encountered = True
+                        if isinstance(exc, SubtitleCaptchaError) and captcha_error is None:
+                            captcha_error = exc
                         self._mark_subhd_domain_cooldown(domain)
                     continue
             if not attempted:
@@ -237,9 +298,14 @@ class ChineseSubtitleProvider:
                         )
                     except Exception as exc:
                         last_error = exc
-            raise SubtitleDownloadError(
-                "subhd requires site verification (/ajax/gzh), captcha challenge blocks auto-download"
-            )
+                        if isinstance(exc, SubtitleCaptchaError) and captcha_error is None:
+                            captcha_error = exc
+            if captcha_error is not None:
+                raise SubtitleCaptchaError(
+                    "subhd requires letter captcha verification before download",
+                    data=captcha_error.data,
+                ) from captcha_error
+            raise SubtitleDownloadError("subhd requires letter captcha verification before download")
         if last_error:
             raise SubtitleDownloadError(f"subhd download failed on all mirrors: {last_error}") from last_error
         raise SubtitleDownloadError("subhd download failed on all mirrors")
@@ -275,11 +341,6 @@ class ChineseSubtitleProvider:
         except Exception as exc:
             raise SubtitleDownloadError(f"subhd preflight request failed ({domain}): {exc}") from exc
 
-        if self._is_subhd_site_verification_page(down_response.text):
-            raise SubtitleDownloadError(f"subhd site verification required (/ajax/gzh) on {domain}")
-        if self._looks_like_captcha_page(down_response.text):
-            raise SubtitleDownloadError(f"subhd captcha required on {domain}")
-
         # Cloudflare anti-bot preflight link.
         try:
             down_soup = BeautifulSoup(down_response.text, "html.parser")
@@ -297,15 +358,77 @@ class ChineseSubtitleProvider:
         except Exception:
             pass
 
+        payload = self._request_subhd_download_payload(
+            domain=domain,
+            sid=sid,
+            detail_url=detail_url,
+            down_page_url=down_page_url,
+            captcha_code="",
+        )
+
+        if payload.get("pass") is False:
+            challenge = self._create_captcha_challenge(
+                domain=domain,
+                sid=sid,
+                candidate=candidate,
+                query=query,
+                detail_url=detail_url,
+                down_page_url=down_page_url,
+                html=down_response.text,
+                captcha_payload=payload,
+            )
+            raise SubtitleCaptchaError(
+                f"subhd letter captcha required on {domain}",
+                data=self._captcha_error_data(challenge),
+            )
+        if payload.get("success") is not True:
+            message = str(payload.get("msg") or "subhd download api failed")
+            if self._message_mentions_captcha(message):
+                challenge = self._create_captcha_challenge(
+                    domain=domain,
+                    sid=sid,
+                    candidate=candidate,
+                    query=query,
+                    detail_url=detail_url,
+                    down_page_url=down_page_url,
+                    html=down_response.text,
+                    captcha_payload=payload,
+                )
+                raise SubtitleCaptchaError(message, data=self._captcha_error_data(challenge))
+            raise SubtitleDownloadError(message)
+
+        return self._download_subhd_file_from_payload(
+            payload=payload,
+            domain=domain,
+            down_page_url=down_page_url,
+            candidate=candidate,
+            query=query,
+        )
+
+    def _request_subhd_download_payload(
+        self,
+        *,
+        domain: str,
+        sid: str,
+        detail_url: str,
+        down_page_url: str,
+        captcha_code: str,
+    ) -> dict[str, Any]:
+        base_url = f"https://{domain}"
+        request_headers = {
+            "User-Agent": self._session.headers.get("User-Agent", "MoviePilotSubtitleAgent/0.2"),
+            "Accept": "application/json, text/plain, */*",
+            "Referer": down_page_url,
+            "Origin": base_url,
+            "Content-Type": "application/json",
+        }
         try:
             api_response = self._session.post(
                 f"{base_url}/api/sub/down",
-                json={"sid": sid, "cap": ""},
+                json={"sid": sid, "cap": captcha_code},
                 timeout=self._timeout,
                 headers={
                     **request_headers,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/plain, */*",
                     "Referer": down_page_url,
                 },
             )
@@ -319,13 +442,18 @@ class ChineseSubtitleProvider:
             payload = api_response.json()
         except Exception as exc:
             raise SubtitleDownloadError(f"subhd download api returned invalid json ({domain}): {exc}") from exc
+        return payload
 
-        if payload.get("pass") is False:
-            raise SubtitleDownloadError(f"subhd site verification required (/ajax/gzh) on {domain}")
-        if payload.get("success") is not True:
-            message = str(payload.get("msg") or "subhd download api failed")
-            raise SubtitleDownloadError(message)
-
+    def _download_subhd_file_from_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        domain: str,
+        down_page_url: str,
+        candidate: DirectSubtitleCandidate,
+        query: SearchRequest,
+    ) -> DownloadedSubtitle:
+        base_url = f"https://{domain}"
         final_url = str(payload.get("url") or "").strip()
         if not final_url:
             raise SubtitleDownloadError("subhd download api did not return file url")
@@ -515,10 +643,234 @@ class ChineseSubtitleProvider:
             return False
         return True
 
+    def _create_captcha_challenge(
+        self,
+        *,
+        domain: str,
+        sid: str,
+        candidate: DirectSubtitleCandidate,
+        query: SearchRequest,
+        detail_url: str,
+        down_page_url: str,
+        html: str,
+        captcha_payload: dict[str, Any] | None = None,
+    ) -> SubhdCaptchaChallenge:
+        self._cleanup_captcha_challenges()
+
+        image_content, image_content_type, image_path = self._extract_subhd_captcha_image(
+            html=html,
+            base_url=f"https://{domain}",
+            down_page_url=down_page_url,
+            captcha_payload=captcha_payload,
+        )
+
+        challenge = SubhdCaptchaChallenge(
+            challenge_id=uuid4().hex,
+            provider=candidate.provider,
+            subtitle_id=sid,
+            domain=domain,
+            detail_url=detail_url,
+            down_page_url=down_page_url,
+            image_content=image_content,
+            image_content_type=image_content_type or "image/png",
+            image_path=image_path,
+            candidate=candidate,
+            query=query,
+            created_at_monotonic=time.monotonic(),
+        )
+        with self._captcha_lock:
+            self._captcha_challenges[challenge.challenge_id] = challenge
+        return challenge
+
+    def _refresh_captcha_challenge(
+        self,
+        challenge: SubhdCaptchaChallenge,
+        *,
+        captcha_payload: dict[str, Any] | None = None,
+    ) -> SubhdCaptchaChallenge:
+        html = ""
+        if captcha_payload is None:
+            try:
+                response = self._session.get(
+                    challenge.down_page_url,
+                    timeout=self._timeout,
+                    allow_redirects=True,
+                    headers={
+                        "Referer": challenge.detail_url,
+                        "User-Agent": self._session.headers.get("User-Agent", "MoviePilotSubtitleAgent/0.2"),
+                    },
+                )
+                html = response.text if response.status_code == 200 else ""
+            except Exception:
+                html = ""
+
+        refreshed = self._create_captcha_challenge(
+            domain=challenge.domain,
+            sid=challenge.subtitle_id,
+            candidate=challenge.candidate,
+            query=challenge.query,
+            detail_url=challenge.detail_url,
+            down_page_url=challenge.down_page_url,
+            html=html,
+            captcha_payload=captcha_payload,
+        )
+        self._remove_captcha_challenge(challenge.challenge_id)
+        return refreshed
+
+    def _get_captcha_challenge(self, challenge_id: str) -> SubhdCaptchaChallenge:
+        self._cleanup_captcha_challenges()
+        key = str(challenge_id or "").strip()
+        with self._captcha_lock:
+            challenge = self._captcha_challenges.get(key)
+        if challenge is None:
+            raise SubtitleNotFoundError("captcha challenge not found or expired")
+        return challenge
+
+    def _remove_captcha_challenge(self, challenge_id: str) -> None:
+        key = str(challenge_id or "").strip()
+        if not key:
+            return
+        with self._captcha_lock:
+            self._captcha_challenges.pop(key, None)
+
+    def _cleanup_captcha_challenges(self) -> None:
+        now = time.monotonic()
+        expired: list[str] = []
+        with self._captcha_lock:
+            for challenge_id, challenge in self._captcha_challenges.items():
+                if (now - challenge.created_at_monotonic) >= self._captcha_challenge_ttl_seconds:
+                    expired.append(challenge_id)
+            for challenge_id in expired:
+                self._captcha_challenges.pop(challenge_id, None)
+
+    def _captcha_error_data(self, challenge: SubhdCaptchaChallenge) -> dict[str, Any]:
+        return {
+            "captcha": {
+                "challenge_id": challenge.challenge_id,
+                "provider": challenge.provider,
+                "subtitle_id": challenge.subtitle_id,
+                "domain": challenge.domain,
+                "detail_url": challenge.detail_url,
+                "image_path": f"/api/v1/subtitles/captcha/image/{challenge.challenge_id}",
+                "image_available": bool(challenge.image_content),
+            }
+        }
+
+    def _extract_subhd_captcha_image(
+        self,
+        *,
+        html: str,
+        base_url: str,
+        down_page_url: str,
+        captcha_payload: dict[str, Any] | None,
+    ) -> tuple[bytes, str, str]:
+        image_content, image_content_type, image_path = self._extract_subhd_captcha_svg(captcha_payload)
+        if image_content:
+            return image_content, image_content_type, image_path
+
+        image_url = self._extract_subhd_captcha_image_url(html, base_url=base_url)
+        if not image_url:
+            return b"", "image/png", ""
+
+        try:
+            response = self._session.get(
+                image_url,
+                timeout=self._timeout,
+                allow_redirects=True,
+                headers={
+                    "Referer": down_page_url,
+                    "User-Agent": self._session.headers.get("User-Agent", "MoviePilotSubtitleAgent/0.2"),
+                },
+            )
+            if response.status_code == 200 and response.content:
+                return (
+                    response.content,
+                    str(response.headers.get("Content-Type") or "image/png").split(";", 1)[0],
+                    urlparse(image_url).path or "",
+                )
+        except Exception:
+            pass
+        return b"", "image/png", ""
+
+    @staticmethod
+    def _extract_subhd_captcha_svg(captcha_payload: dict[str, Any] | None) -> tuple[bytes, str, str]:
+        if not isinstance(captcha_payload, dict):
+            return b"", "image/png", ""
+        message = captcha_payload.get("msg")
+        if not isinstance(message, str):
+            return b"", "image/png", ""
+        text = message.strip()
+        if not text:
+            return b"", "image/png", ""
+        if "<svg" not in text.lower() or "</svg>" not in text.lower():
+            return b"", "image/png", ""
+        return text.encode("utf-8"), "image/svg+xml", "subhd-captcha.svg"
+
+    @staticmethod
+    def _extract_subhd_captcha_image_url(html: str, *, base_url: str) -> str:
+        soup = BeautifulSoup(str(html or ""), "html.parser")
+
+        prioritized_sources: list[str] = []
+        input_node = soup.find("input", attrs={"id": "gzhcode"})
+        if input_node is not None:
+            for node in input_node.find_all_previous("img", limit=5):
+                src = str(node.get("src") or "").strip()
+                if src:
+                    prioritized_sources.append(src)
+            parent = input_node.parent
+            if parent is not None:
+                for node in parent.find_all("img"):
+                    src = str(node.get("src") or "").strip()
+                    if src:
+                        prioritized_sources.append(src)
+
+        for selector in (
+            "img[src*='captcha']",
+            "img[src*='code']",
+            "img[src*='verify']",
+            "img[src*='yzm']",
+            "img[src*='gzh']",
+        ):
+            for node in soup.select(selector):
+                src = str(node.get("src") or "").strip()
+                if src:
+                    prioritized_sources.append(src)
+
+        for raw_src in prioritized_sources:
+            lowered = raw_src.lower()
+            if "poster" in lowered or "logo" in lowered or "favicon" in lowered:
+                continue
+            return raw_src if raw_src.startswith("http") else urljoin(base_url, raw_src)
+
+        return ""
+
+    @staticmethod
+    def _message_mentions_captcha(message: str) -> bool:
+        lowered = str(message or "").strip().lower()
+        if not lowered:
+            return False
+        return (
+            "captcha" in lowered
+            or "验证码" in lowered
+            or "驗證碼" in lowered
+            or "验证" in lowered
+            or "驗證" in lowered
+            or "/ajax/gzh" in lowered
+        )
+
     @staticmethod
     def _looks_like_captcha_page(html: str) -> bool:
         text = str(html or "").lower()
-        return "captcha" in text or "验证码" in text or "g-recaptcha" in text or "/cdn-cgi/challenge" in text
+        return (
+            "captcha" in text
+            or "验证码" in text
+            or "驗證碼" in text
+            or "提交验证" in text
+            or "提交驗證" in text
+            or "gzhcode" in text
+            or "g-recaptcha" in text
+            or "/cdn-cgi/challenge" in text
+        )
 
     @staticmethod
     def _is_subhd_site_verification_page(html: str) -> bool:

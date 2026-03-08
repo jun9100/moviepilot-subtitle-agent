@@ -5,7 +5,7 @@ import types
 import pytest
 
 from app.chinese_provider import SUBHD_MIRRORS, ChineseSubtitleProvider, DirectSubtitleCandidate, DownloadedSubtitle
-from app.errors import SubtitleDownloadError
+from app.errors import SubtitleCaptchaError, SubtitleDownloadError
 from app.models import SearchRequest
 
 
@@ -186,23 +186,154 @@ def test_download_subhd_captcha_required(monkeypatch):
         score=0,
     )
 
+    captcha_svg = "<svg xmlns='http://www.w3.org/2000/svg' width='120' height='40'><text x='10' y='28'>AbCd</text></svg>"
+
+    def fake_get(url, *args, **kwargs):
+        if url == "https://subhd.tv/a/aCQ07t":
+            return _FakeResponse(status_code=200, text="<html></html>")
+        if url == "https://subhd.tv/down/aCQ07t":
+            return _FakeResponse(status_code=200, text="<html><div id='svgBox'></div></html>")
+        raise AssertionError(f"unexpected url: {url}")
+
     monkeypatch.setattr(
         provider._session,
         "get",
-        lambda *args, **kwargs: _FakeResponse(status_code=200, text="<html></html>"),
+        fake_get,
     )
     monkeypatch.setattr(
         provider._session,
         "post",
         lambda *args, **kwargs: _FakeResponse(
             status_code=200,
-            json_data={"success": False, "pass": False, "msg": "请验证码验证"},
+            json_data={"success": False, "pass": False, "msg": captcha_svg},
             headers={"Content-Type": "application/json; charset=utf-8"},
         ),
     )
 
-    with pytest.raises(SubtitleDownloadError):
+    with pytest.raises(SubtitleCaptchaError) as exc:
         provider.download(candidate, query=_query())
+
+    captcha = exc.value.data["captcha"]
+    assert isinstance(captcha.get("challenge_id"), str)
+    assert captcha["provider"] == "subhd"
+    assert captcha["subtitle_id"] == "aCQ07t"
+    assert captcha["domain"] == "subhd.tv"
+    assert captcha["detail_url"] == "https://subhd.tv/a/aCQ07t"
+    assert captcha["image_path"].startswith("/api/v1/subtitles/captcha/image/")
+    assert captcha["image_available"] is True
+
+
+def test_download_subhd_down_page_script_does_not_false_positive(monkeypatch):
+    provider = _provider()
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="Ks2qd5",
+        title="国宝",
+        release_name="Kokuho.2025.1080p.WEBRip.x264.AAC.2.0-CabPro",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/Ks2qd5",
+        page_link="https://subhd.tv/a/Ks2qd5",
+        language_tags=["zh-cn"],
+        matches=[],
+        score=0,
+    )
+    subtitle_content = b"1\n00:00:00,000 --> 00:00:01,000\n\xe4\xbd\xa0\xe5\xa5\xbd\n"
+    down_html = """
+    <div id="svgBox" class="d-none"></div>
+    <input id="capIn" />
+    <button class="btn btn-danger down" sid="Ks2qd5">下载字幕文件</button>
+    <script>
+    async function download() {
+      const res = await fetch("/api/sub/down", {method: "POST"});
+      const data = await res.json();
+      if (data.pass == false) { document.getElementById("svgBox").innerHTML = data.msg; }
+    }
+    </script>
+    """
+
+    def fake_get(url, *args, **kwargs):
+        if url == "https://subhd.tv/a/Ks2qd5":
+            return _FakeResponse(status_code=200, text="<html></html>")
+        if url == "https://subhd.tv/down/Ks2qd5":
+            return _FakeResponse(status_code=200, text=down_html)
+        if url == "https://dl.subhd.tv/demo.srt":
+            return _FakeResponse(
+                status_code=200,
+                content=subtitle_content,
+                headers={"Content-Disposition": "attachment; filename=\"demo.srt\""},
+            )
+        raise AssertionError(f"unexpected url: {url}")
+
+    def fake_post(url, *args, **kwargs):
+        assert url == "https://subhd.tv/api/sub/down"
+        assert kwargs.get("json") == {"sid": "Ks2qd5", "cap": ""}
+        return _FakeResponse(
+            status_code=200,
+            json_data={"success": True, "pass": True, "url": "https://dl.subhd.tv/demo.srt"},
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+
+    monkeypatch.setattr(provider._session, "get", fake_get)
+    monkeypatch.setattr(provider._session, "post", fake_post)
+
+    downloaded = provider.download(candidate, query=_query())
+    assert downloaded.content == subtitle_content
+
+
+def test_solve_subhd_captcha_uses_api_sub_down(monkeypatch):
+    provider = _provider()
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="Ks2qd5",
+        title="国宝",
+        release_name="Kokuho.2025.1080p.WEBRip.x264.AAC.2.0-CabPro",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/Ks2qd5",
+        page_link="https://subhd.tv/a/Ks2qd5",
+        language_tags=["zh-cn"],
+        matches=[],
+        score=0,
+    )
+    query = _query().model_copy(update={"title": "国宝", "media_type": "movie", "year": 2025, "season": None, "episode": None})
+    challenge = provider._create_captcha_challenge(
+        domain="subhd.tv",
+        sid="Ks2qd5",
+        candidate=candidate,
+        query=query,
+        detail_url="https://subhd.tv/a/Ks2qd5",
+        down_page_url="https://subhd.tv/down/Ks2qd5",
+        html="<html></html>",
+        captcha_payload={"msg": "<svg xmlns='http://www.w3.org/2000/svg'></svg>"},
+    )
+    subtitle_content = b"1\n00:00:00,000 --> 00:00:01,000\n\xe4\xbd\xa0\xe5\xa5\xbd\n"
+
+    def fake_post(url, *args, **kwargs):
+        assert url == "https://subhd.tv/api/sub/down"
+        assert kwargs.get("json") == {"sid": "Ks2qd5", "cap": "AbCd"}
+        return _FakeResponse(
+            status_code=200,
+            json_data={"success": True, "pass": True, "url": "https://dl.subhd.tv/demo.srt"},
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+
+    def fake_get(url, *args, **kwargs):
+        if url == "https://dl.subhd.tv/demo.srt":
+            return _FakeResponse(
+                status_code=200,
+                content=subtitle_content,
+                headers={"Content-Disposition": "attachment; filename=\"demo.srt\""},
+            )
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(provider._session, "post", fake_post)
+    monkeypatch.setattr(provider._session, "get", fake_get)
+
+    downloaded, solved_candidate, solved_query = provider.solve_captcha(challenge.challenge_id, code="AbCd")
+    assert downloaded.content == subtitle_content
+    assert solved_candidate.subtitle_id == "Ks2qd5"
+    assert solved_query.title == "国宝"
 
 
 def test_download_subhdtw_retries_mirrors(monkeypatch):
