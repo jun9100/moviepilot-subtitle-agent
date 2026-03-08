@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .config import Settings, get_settings
 from .errors import SubtitleError
 from .models import (
+    CaptchaSolveRequest,
     DownloadRequest,
     DownloadResponse,
     MoviePilotEnvelope,
@@ -20,8 +21,23 @@ from .models import (
 from .service import SubtitleService
 
 
-def _moviepilot_error(message: str) -> MoviePilotEnvelope:
-    return MoviePilotEnvelope(success=False, message=message, data=None)
+def _moviepilot_error(message: str, *, data: object | None = None) -> MoviePilotEnvelope:
+    return MoviePilotEnvelope(success=False, message=message, data=data)
+
+
+def _moviepilot_error_from_exception(exc: SubtitleError) -> MoviePilotEnvelope:
+    data = exc.data
+    if isinstance(data, dict):
+        captcha = data.get("captcha")
+        if isinstance(captcha, dict):
+            captcha = dict(captcha)
+            challenge_id = str(captcha.get("challenge_id") or "").strip()
+            if challenge_id:
+                captcha.setdefault("image_path", f"/api/v1/subtitles/captcha/image/{challenge_id}")
+                captcha.setdefault("solve_path", "/api/v1/subtitles/captcha/solve")
+            data = dict(data)
+            data["captcha"] = captcha
+    return _moviepilot_error(exc.message, data=data)
 
 
 def _build_content_disposition(filename: str | None, *, fallback: str = "subtitle.srt") -> str:
@@ -106,6 +122,29 @@ def create_app(
         }
         return StreamingResponse(io.BytesIO(fetched.content), media_type=media_type, headers=headers)
 
+    @app.get("/api/v1/subtitles/captcha/image/{challenge_id}")
+    def get_captcha_image(challenge_id: str, request: Request):
+        content, media_type = get_service(request).get_captcha_image(challenge_id)
+        headers = {"Cache-Control": "no-store"}
+        return StreamingResponse(io.BytesIO(content), media_type=media_type, headers=headers)
+
+    @app.post("/api/v1/subtitles/captcha/solve")
+    def solve_captcha(payload: CaptchaSolveRequest, request: Request):
+        try:
+            fetched = get_service(request).solve_captcha_to_memory(
+                payload.challenge_id,
+                code=payload.code,
+                filename=payload.filename,
+            )
+        except SubtitleError as exc:
+            return JSONResponse(status_code=200, content=_moviepilot_error_from_exception(exc).model_dump())
+
+        media_type = "application/x-subrip" if fetched.subtitle_format == "srt" else "application/octet-stream"
+        headers = {
+            "Content-Disposition": _build_content_disposition(fetched.filename),
+        }
+        return StreamingResponse(io.BytesIO(fetched.content), media_type=media_type, headers=headers)
+
     @app.post("/api/v1/moviepilot/subtitles/search", response_model=MoviePilotEnvelope)
     @app.post("/api/moviepilot/subtitles/search", response_model=MoviePilotEnvelope)
     @app.post("/moviepilot/subtitles/search", response_model=MoviePilotEnvelope)
@@ -116,7 +155,7 @@ def create_app(
         try:
             response = get_service(request).search(query)
         except SubtitleError as exc:
-            return _moviepilot_error(exc.message)
+            return _moviepilot_error_from_exception(exc)
 
         items = [
             MoviePilotSubtitleItem(
@@ -153,7 +192,7 @@ def create_app(
         try:
             fetched = get_service(request).fetch_to_memory(token)
         except SubtitleError as exc:
-            return JSONResponse(status_code=200, content=_moviepilot_error(exc.message).model_dump())
+            return JSONResponse(status_code=200, content=_moviepilot_error_from_exception(exc).model_dump())
 
         media_type = "application/x-subrip" if fetched.subtitle_format == "srt" else "application/octet-stream"
         headers = {
@@ -168,7 +207,7 @@ def create_app(
         try:
             downloaded = get_service(request).download_to_disk(payload.token, filename=payload.filename)
         except SubtitleError as exc:
-            return _moviepilot_error(exc.message)
+            return _moviepilot_error_from_exception(exc)
 
         return MoviePilotEnvelope(success=True, message="ok", data=downloaded.model_dump())
 

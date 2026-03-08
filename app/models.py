@@ -68,6 +68,17 @@ class DownloadRequest(BaseModel):
     filename: str | None = None
 
 
+class CaptchaSolveRequest(BaseModel):
+    challenge_id: str = Field(..., min_length=1)
+    code: str = Field(..., min_length=1, max_length=16)
+    filename: str | None = None
+
+    @field_validator("code")
+    @classmethod
+    def normalize_code(cls, value: str) -> str:
+        return value.strip()
+
+
 class DownloadResponse(BaseModel):
     token: str
     provider: str

@@ -7,11 +7,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.config import Settings
-from app.errors import SubtitleDownloadError, SubtitleNotFoundError
+from app.errors import SubtitleCaptchaError, SubtitleDownloadError, SubtitleNotFoundError
 from app.models import SearchRequest, SubtitleSearchItem
 from app.service import CachedSubtitle, ProviderPerformanceStats, SubtitleService
 
 from .fakes import FakeChineseProvider, make_candidate
+from app.chinese_provider import DownloadedSubtitle
 
 
 class _FakeSubliminalSubtitle:
@@ -632,6 +633,7 @@ def test_download_prioritizes_non_subhd_candidates_before_subhd_family(tmp_path)
             subtitle_output_dir=tmp_path,
             token_ttl_seconds=3600,
             enable_subliminal_fallback=False,
+            enable_adaptive_provider_priority=False,
         ),
         chinese_provider=provider,
     )
@@ -740,6 +742,99 @@ def test_download_error_mentions_fallback_attempts_when_exhausted(tmp_path):
     message = str(exc.value)
     assert "fallback providers attempted" in message
     assert "podnapisi,tvsubtitles,opensubtitlescom" in message
+
+
+def test_download_error_preserves_captcha_data_when_fallback_exhausted(tmp_path):
+    provider = FakeChineseProvider(
+        [make_candidate(subtitle_id="s-direct", score=88, provider="subhd")],
+        error_by_subtitle_id={
+            "s-direct": SubtitleCaptchaError(
+                "subhd letter captcha required on subhd.tv",
+                data={"captcha": {"challenge_id": "cap-1", "image_path": "/api/v1/subtitles/captcha/image/cap-1"}},
+            )
+        },
+    )
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="subhd",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            token_ttl_seconds=3600,
+            enable_subliminal_fallback=True,
+            subliminal_fallback_providers="podnapisi,tvsubtitles",
+        ),
+        backend=_FakeBackend(),
+        chinese_provider=provider,
+    )
+
+    def fake_search_with_subliminal(self, *, query, providers, stage_index=None):
+        return []
+
+    service._search_with_subliminal_providers = types.MethodType(fake_search_with_subliminal, service)
+
+    search_result = service.search(
+        SearchRequest(
+            title="短剧开始啦",
+            media_type="tv",
+            season=1,
+            episode=3,
+            languages=["zh-cn", "zh-tw"],
+            limit=5,
+        )
+    )
+    token = search_result.items[0].token
+
+    with pytest.raises(SubtitleDownloadError) as exc:
+        service.fetch_to_memory(token)
+
+    assert isinstance(exc.value, SubtitleCaptchaError)
+    assert exc.value.data == {
+        "captcha": {"challenge_id": "cap-1", "image_path": "/api/v1/subtitles/captcha/image/cap-1"}
+    }
+
+
+def test_solve_captcha_to_memory_returns_verified_subtitle(tmp_path):
+    candidate = make_candidate(subtitle_id="s-direct", score=88, provider="subhd")
+    query = SearchRequest(
+        title="短剧开始啦",
+        media_type="tv",
+        season=1,
+        episode=3,
+        languages=["zh-cn", "zh-tw"],
+        limit=5,
+    )
+    provider = FakeChineseProvider(
+        [candidate],
+        captcha_solve_result_by_id={
+            "cap-1": (
+                DownloadedSubtitle(
+                    content="1\n00:00:00,000 --> 00:00:01,000\n测试中文字幕\n".encode("utf-8"),
+                    subtitle_format="srt",
+                    language="zh-cn",
+                    filename="demo.srt",
+                ),
+                candidate,
+                query,
+            )
+        },
+    )
+    service = SubtitleService(
+        settings=Settings(
+            default_providers="subhd",
+            default_languages="zh-cn,zh-tw",
+            subtitle_output_dir=tmp_path,
+            token_ttl_seconds=3600,
+        ),
+        backend=_FakeBackend(),
+        chinese_provider=provider,
+    )
+
+    fetched = service.solve_captcha_to_memory("cap-1", code="AbCd")
+
+    assert fetched.provider == "subhd"
+    assert fetched.subtitle_id == "s-direct"
+    assert fetched.filename.endswith(".srt")
+    assert "测试中文字幕".encode("utf-8") in fetched.content
 
 
 def test_is_subhd_captcha_error_supports_ajax_gzh_message(tmp_path):

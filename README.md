@@ -121,12 +121,22 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 - `POST /api/v1/subtitles/search`
 - `POST /api/v1/subtitles/download`
 - `GET /api/v1/subtitles/fetch/{token}`
+- `GET /api/v1/subtitles/captcha/image/{challenge_id}`
+- `POST /api/v1/subtitles/captcha/solve`
 
 ## MoviePilot 兼容 API
 
 - `POST /api/v1/moviepilot/subtitles/search`
 - `GET /api/v1/moviepilot/subtitles/download/{token}`
 - `POST /api/v1/moviepilot/subtitles/download`
+
+当 `subhd/subhdtw` 下载被字母验证码拦截时，兼容接口会返回结构化 `captcha` 数据：
+
+- `challenge_id`
+- `image_path`
+- `solve_path`
+
+插件可以据此把验证码图片推送给用户，再由用户回复验证码继续下载。
 
 兼容别名：
 
@@ -149,6 +159,9 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 
 ## 更新记录（近期）
 
+- `v0.2.21`：补全 MoviePilot 验证码闭环：新增 `GET /api/v1/subtitles/captcha/image/{challenge_id}` 与 `POST /api/v1/subtitles/captcha/solve`；当下载失败由验证码触发时，错误响应会保留 `captcha` 结构化数据（含 `image_path/solve_path`），便于插件稳定接力。
+- `v0.2.20`：强化 `subhd` 验证码稳定性：修复 challenge 刷新链路、优先提取真实验证码图、兼容无图 SVG 回退、验证码大小写变体自动重试，降低“已人工输入但仍失败”的概率。
+- `v0.2.14`：新增 `subhd` 字母验证码挑战链路：服务端缓存验证码任务，开放验证码图片读取与提交接口，供 MoviePilot 插件推送图片并接收用户回填验证码后继续下载。
 - `v0.2.13`：新增“分级内自适应 provider 优先级”：按历史检索/下载成功率动态重排分级内源（保持分级与并发策略不变），优先可自动下载的来源。
 - `v0.2.12`：细化 `subhd` 失败原因文案，明确提示“站点验证（/ajax/gzh）导致无法自动下载”，便于插件通知和用户手动处理。
 - `v0.2.11`：CookieCloud 配置改为通用命名 `COOKIECLOUD_*`（兼容旧的 `SUBHD_COOKIECLOUD_*`），避免误导为仅限 subhd。

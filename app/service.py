@@ -18,7 +18,7 @@ from subliminal.video import Episode, Movie
 from .backend import SubliminalBackend, language_to_code, parse_languages
 from .chinese_provider import ChineseSubtitleProvider, DirectSubtitleCandidate, DownloadedSubtitle
 from .config import Settings
-from .errors import SubtitleDownloadError, SubtitleNotFoundError, SubtitleSearchError
+from .errors import SubtitleCaptchaError, SubtitleDownloadError, SubtitleNotFoundError, SubtitleSearchError
 from .models import DownloadResponse, SearchRequest, SearchResponse, SubtitleSearchItem
 
 
@@ -280,6 +280,32 @@ class SubtitleService:
             sha256=digest,
         )
 
+    def get_captcha_image(self, challenge_id: str) -> tuple[bytes, str]:
+        return self._chinese_provider.get_captcha_image(challenge_id)
+
+    def solve_captcha_to_memory(
+        self,
+        challenge_id: str,
+        *,
+        code: str,
+        filename: str | None = None,
+    ) -> InMemorySubtitle:
+        downloaded, candidate, query = self._chinese_provider.solve_captcha(challenge_id, code=code)
+
+        requires_chinese = self._requires_chinese_subtitle(query.languages)
+        if requires_chinese:
+            is_verified, confidence = self._verify_chinese_content(downloaded.content)
+            if not is_verified:
+                raise SubtitleDownloadError(self._chinese_confidence_error(confidence))
+
+        return self._build_in_memory_direct(
+            token=challenge_id,
+            query=query,
+            candidate=candidate,
+            downloaded=downloaded,
+            filename=filename,
+        )
+
     def fetch_to_memory(self, token: str, filename: str | None = None) -> InMemorySubtitle:
         entry = self._get_cached_subtitle(token)
 
@@ -372,9 +398,10 @@ class SubtitleService:
                 )
             except Exception as exc:
                 if last_error:
-                    raise SubtitleDownloadError(
-                        f"failed to get verified Chinese subtitle from direct candidates: {last_error}; "
-                        f"subliminal fallback failed: {exc}"
+                    raise self._download_error_with_context(
+                        last_error,
+                        "failed to get verified Chinese subtitle from direct candidates: "
+                        f"{last_error}; subliminal fallback failed: {exc}",
                     ) from exc
                 raise SubtitleDownloadError(f"subliminal fallback failed: {exc}") from exc
 
@@ -384,16 +411,26 @@ class SubtitleService:
         if last_error:
             if fallback_checked:
                 providers = ",".join(self._settings.subliminal_provider_list) or "none"
-                raise SubtitleDownloadError(
+                raise self._download_error_with_context(
+                    last_error,
                     "failed to get verified Chinese subtitle from direct candidates: "
                     f"{last_error}; fallback providers attempted ({providers}) "
-                    "but no verified Chinese subtitle found"
+                    "but no verified Chinese subtitle found",
                 ) from last_error
-            raise SubtitleDownloadError(
-                f"failed to get verified Chinese subtitle from direct candidates: {last_error}"
+            raise self._download_error_with_context(
+                last_error,
+                f"failed to get verified Chinese subtitle from direct candidates: {last_error}",
             ) from last_error
 
         raise SubtitleDownloadError("failed to get verified Chinese subtitle from direct candidates")
+
+    @staticmethod
+    def _download_error_with_context(source_error: Exception, message: str) -> SubtitleDownloadError:
+        if isinstance(source_error, SubtitleCaptchaError):
+            return SubtitleCaptchaError(message, data=source_error.data)
+        if isinstance(source_error, SubtitleDownloadError):
+            return SubtitleDownloadError(message, data=source_error.data)
+        return SubtitleDownloadError(message)
 
     def _fetch_with_subliminal_fallback(
         self,

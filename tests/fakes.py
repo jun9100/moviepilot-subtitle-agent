@@ -11,12 +11,18 @@ class FakeChineseProvider:
         content: bytes | None = None,
         content_by_subtitle_id: dict[str, bytes] | None = None,
         error_by_subtitle_id: dict[str, Exception] | None = None,
+        captcha_images: dict[str, tuple[bytes, str]] | None = None,
+        captcha_solve_result_by_id: dict[str, tuple[DownloadedSubtitle, DirectSubtitleCandidate, object]] | None = None,
+        captcha_error_by_id: dict[str, Exception] | None = None,
         subtitle_format: str = "srt",
     ) -> None:
         self.candidates = candidates
         self.content = content or "1\n00:00:00,000 --> 00:00:01,000\n测试中文字幕\n".encode("utf-8")
         self.content_by_subtitle_id = content_by_subtitle_id or {}
         self.error_by_subtitle_id = error_by_subtitle_id or {}
+        self.captcha_images = captcha_images or {}
+        self.captcha_solve_result_by_id = captcha_solve_result_by_id or {}
+        self.captcha_error_by_id = captcha_error_by_id or {}
         self.subtitle_format = subtitle_format
         self.search_calls = 0
         self.download_calls: list[str] = []
@@ -37,6 +43,20 @@ class FakeChineseProvider:
             language=candidate.language,
             filename=f"{candidate.subtitle_id}.{self.subtitle_format}",
         )
+
+    def get_captcha_image(self, challenge_id):
+        if challenge_id not in self.captcha_images:
+            raise KeyError(challenge_id)
+        return self.captcha_images[challenge_id]
+
+    def solve_captcha(self, challenge_id, *, code):
+        forced_error = self.captcha_error_by_id.get(challenge_id)
+        if forced_error is not None:
+            raise forced_error
+        result = self.captcha_solve_result_by_id.get(challenge_id)
+        if result is None:
+            raise KeyError(challenge_id)
+        return result
 
 
 def make_candidate(
