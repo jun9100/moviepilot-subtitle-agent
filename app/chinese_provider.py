@@ -237,6 +237,26 @@ class ChineseSubtitleProvider:
             captcha_code=captcha_code,
         )
 
+        # Case-tolerance fallback: when users input correct letters but wrong case,
+        # retry a few cheap variants before rotating the captcha challenge.
+        if payload.get("pass") is False or payload.get("success") is not True:
+            for alt_code in self._captcha_case_variants(captcha_code):
+                if alt_code == captcha_code:
+                    continue
+                try:
+                    alt_payload = self._request_subhd_download_payload(
+                        domain=challenge.domain,
+                        sid=challenge.subtitle_id,
+                        detail_url=challenge.detail_url,
+                        down_page_url=challenge.down_page_url,
+                        captcha_code=alt_code,
+                    )
+                except Exception:
+                    continue
+                if alt_payload.get("pass") is not False and alt_payload.get("success") is True:
+                    payload = alt_payload
+                    break
+
         message = str(payload.get("msg") or "")
         if (payload.get("pass") is False or payload.get("success") is not True) and self._is_subhd_temporary_page_expired(
             message
@@ -968,6 +988,21 @@ class ChineseSubtitleProvider:
         if ChineseSubtitleProvider._is_subhd_temporary_page_expired(text):
             return "subhd captcha expired or invalid, please retry with latest challenge"
         return text
+
+    @staticmethod
+    def _captcha_case_variants(code: str) -> list[str]:
+        text = str(code or "").strip()
+        if not text:
+            return []
+        variants = [text, text.lower(), text.upper(), text.swapcase()]
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for item in variants:
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            ordered.append(item)
+        return ordered
 
     @staticmethod
     def _looks_like_captcha_page(html: str) -> bool:
