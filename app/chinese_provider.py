@@ -824,6 +824,8 @@ class ChineseSubtitleProvider:
                 self._captcha_challenges.pop(challenge_id, None)
 
     def _captcha_error_data(self, challenge: SubhdCaptchaChallenge) -> dict[str, Any]:
+        image_available = bool(challenge.image_content)
+        image_path = f"/api/v1/subtitles/captcha/image/{challenge.challenge_id}" if image_available else ""
         return {
             "captcha": {
                 "challenge_id": challenge.challenge_id,
@@ -831,8 +833,8 @@ class ChineseSubtitleProvider:
                 "subtitle_id": challenge.subtitle_id,
                 "domain": challenge.domain,
                 "detail_url": challenge.detail_url,
-                "image_path": f"/api/v1/subtitles/captcha/image/{challenge.challenge_id}",
-                "image_available": bool(challenge.image_content),
+                "image_path": image_path,
+                "image_available": image_available,
             }
         }
 
