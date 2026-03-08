@@ -218,6 +218,17 @@ class ChineseSubtitleProvider:
         if not captcha_code:
             raise SubtitleCaptchaError("captcha code is required", data=self._captcha_error_data(challenge))
 
+        # Re-prime subhd detail/down pages before manual submit. Without this, subhd may
+        # return "temporary page expired" even for fresh user replies.
+        try:
+            self._prime_subhd_download_context(
+                domain=challenge.domain,
+                detail_url=challenge.detail_url,
+                down_page_url=challenge.down_page_url,
+            )
+        except Exception:
+            pass
+
         payload = self._request_subhd_download_payload(
             domain=challenge.domain,
             sid=challenge.subtitle_id,
@@ -225,6 +236,28 @@ class ChineseSubtitleProvider:
             down_page_url=challenge.down_page_url,
             captcha_code=captcha_code,
         )
+
+        message = str(payload.get("msg") or "")
+        if (payload.get("pass") is False or payload.get("success") is not True) and self._is_subhd_temporary_page_expired(
+            message
+        ):
+            # Some mirrors return a stale-page error on first submit. Retry once with
+            # a fresh down-page preflight and the same captcha text.
+            try:
+                self._prime_subhd_download_context(
+                    domain=challenge.domain,
+                    detail_url=challenge.detail_url,
+                    down_page_url=challenge.down_page_url,
+                )
+                payload = self._request_subhd_download_payload(
+                    domain=challenge.domain,
+                    sid=challenge.subtitle_id,
+                    detail_url=challenge.detail_url,
+                    down_page_url=challenge.down_page_url,
+                    captcha_code=captcha_code,
+                )
+            except Exception:
+                pass
 
         if payload.get("pass") is False or payload.get("success") is not True:
             refreshed_payload: dict[str, Any] | None = None
@@ -244,7 +277,7 @@ class ChineseSubtitleProvider:
                 challenge,
                 captcha_payload=refreshed_payload or payload,
             )
-            message = str(payload.get("msg") or "subhd captcha validation failed")
+            message = self._normalize_subhd_captcha_message(payload.get("msg"))
             raise SubtitleCaptchaError(message, data=self._captcha_error_data(refreshed))
 
         downloaded = self._download_subhd_file_from_payload(
@@ -337,41 +370,11 @@ class ChineseSubtitleProvider:
         detail_url = f"{base_url}/a/{sid}"
         down_page_url = f"{base_url}/down/{sid}"
 
-        request_headers = {
-            "User-Agent": self._session.headers.get("User-Agent", "MoviePilotSubtitleAgent/0.2"),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": detail_url,
-            "Origin": base_url,
-        }
-
-        try:
-            # Prime cookies/token required by subhd download API.
-            self._session.get(detail_url, timeout=self._timeout, allow_redirects=True)
-            down_response = self._session.get(
-                down_page_url,
-                timeout=self._timeout,
-                allow_redirects=True,
-                headers=request_headers,
-            )
-        except Exception as exc:
-            raise SubtitleDownloadError(f"subhd preflight request failed ({domain}): {exc}") from exc
-
-        # Cloudflare anti-bot preflight link.
-        try:
-            down_soup = BeautifulSoup(down_response.text, "html.parser")
-            cf_link = down_soup.select_one("a[href*='/cdn-cgi/content?id=']")
-            if cf_link:
-                href = str(cf_link.get("href") or "").strip()
-                if href:
-                    content_url = href if href.startswith("http") else urljoin(base_url, href)
-                    self._session.get(
-                        content_url,
-                        timeout=self._timeout,
-                        allow_redirects=True,
-                        headers={**request_headers, "Referer": down_page_url},
-                    )
-        except Exception:
-            pass
+        down_html = self._prime_subhd_download_context(
+            domain=domain,
+            detail_url=detail_url,
+            down_page_url=down_page_url,
+        )
 
         payload = self._request_subhd_download_payload(
             domain=domain,
@@ -389,7 +392,7 @@ class ChineseSubtitleProvider:
                 query=query,
                 detail_url=detail_url,
                 down_page_url=down_page_url,
-                html=down_response.text,
+                html=down_html,
                 captcha_payload=payload,
             )
             raise SubtitleCaptchaError(
@@ -406,7 +409,7 @@ class ChineseSubtitleProvider:
                     query=query,
                     detail_url=detail_url,
                     down_page_url=down_page_url,
-                    html=down_response.text,
+                    html=down_html,
                     captcha_payload=payload,
                 )
                 raise SubtitleCaptchaError(message, data=self._captcha_error_data(challenge))
@@ -497,6 +500,44 @@ class ChineseSubtitleProvider:
             source_url=final_url,
             content_disposition=file_response.headers.get("Content-Disposition"),
         )
+
+    def _prime_subhd_download_context(self, *, domain: str, detail_url: str, down_page_url: str) -> str:
+        base_url = f"https://{domain}"
+        request_headers = {
+            "User-Agent": self._session.headers.get("User-Agent", "MoviePilotSubtitleAgent/0.2"),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": detail_url,
+            "Origin": base_url,
+        }
+        try:
+            # Prime cookies/token required by subhd download API.
+            self._session.get(detail_url, timeout=self._timeout, allow_redirects=True)
+            down_response = self._session.get(
+                down_page_url,
+                timeout=self._timeout,
+                allow_redirects=True,
+                headers=request_headers,
+            )
+        except Exception as exc:
+            raise SubtitleDownloadError(f"subhd preflight request failed ({domain}): {exc}") from exc
+
+        # Cloudflare anti-bot preflight link.
+        try:
+            down_soup = BeautifulSoup(down_response.text, "html.parser")
+            cf_link = down_soup.select_one("a[href*='/cdn-cgi/content?id=']")
+            if cf_link:
+                href = str(cf_link.get("href") or "").strip()
+                if href:
+                    content_url = href if href.startswith("http") else urljoin(base_url, href)
+                    self._session.get(
+                        content_url,
+                        timeout=self._timeout,
+                        allow_redirects=True,
+                        headers={**request_headers, "Referer": down_page_url},
+                    )
+        except Exception:
+            pass
+        return str(getattr(down_response, "text", "") or "")
 
     def _subhd_domain_order(self, candidate: DirectSubtitleCandidate) -> list[str]:
         domains = list(SUBHD_MIRRORS)
@@ -896,6 +937,37 @@ class ChineseSubtitleProvider:
             or "驗證" in lowered
             or "/ajax/gzh" in lowered
         )
+
+    @staticmethod
+    def _is_subhd_temporary_page_expired(message: Any) -> bool:
+        text = str(message or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        markers = (
+            "临时页面已经失效",
+            "臨時頁面已經失效",
+            "页面已经失效",
+            "頁面已經失效",
+            "时间过长",
+            "時間過長",
+            "page expired",
+            "temporary page",
+            "captcha expired",
+        )
+        return any(marker in text or marker in lowered for marker in markers)
+
+    @staticmethod
+    def _normalize_subhd_captcha_message(message: Any) -> str:
+        text = str(message or "").strip()
+        if not text:
+            return "subhd captcha validation failed"
+        lowered = text.lower()
+        if "<svg" in lowered and "</svg>" in lowered:
+            return "subhd captcha validation failed"
+        if ChineseSubtitleProvider._is_subhd_temporary_page_expired(text):
+            return "subhd captcha expired or invalid, please retry with latest challenge"
+        return text
 
     @staticmethod
     def _looks_like_captcha_page(html: str) -> bool:
