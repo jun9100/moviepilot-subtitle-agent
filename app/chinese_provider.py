@@ -882,10 +882,6 @@ class ChineseSubtitleProvider:
             return b"", "image/png", ""
         if "<svg" not in text.lower() or "</svg>" not in text.lower():
             return b"", "image/png", ""
-        # Some anti-bot responses embed verbose non-captcha SVG/HTML fragments in msg.
-        # Ignore unusually large payloads and fall back to captcha image URL from down page.
-        if len(text) > 5000:
-            return b"", "image/png", ""
         return text.encode("utf-8"), "image/svg+xml", "subhd-captcha.svg"
 
     @staticmethod
