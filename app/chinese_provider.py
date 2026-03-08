@@ -225,9 +225,22 @@ class ChineseSubtitleProvider:
         )
 
         if payload.get("pass") is False or payload.get("success") is not True:
+            refreshed_payload: dict[str, Any] | None = None
+            # SubHD may return "page expired" on wrong/late code without SVG challenge body.
+            # Proactively request a fresh challenge so follow-up attempts still have an image.
+            try:
+                refreshed_payload = self._request_subhd_download_payload(
+                    domain=challenge.domain,
+                    sid=challenge.subtitle_id,
+                    detail_url=challenge.detail_url,
+                    down_page_url=challenge.down_page_url,
+                    captcha_code="",
+                )
+            except Exception:
+                refreshed_payload = None
             refreshed = self._refresh_captcha_challenge(
                 challenge,
-                captcha_payload=payload,
+                captcha_payload=refreshed_payload or payload,
             )
             message = str(payload.get("msg") or "subhd captcha validation failed")
             raise SubtitleCaptchaError(message, data=self._captcha_error_data(refreshed))
