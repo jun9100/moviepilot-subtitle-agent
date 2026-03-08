@@ -844,32 +844,30 @@ class ChineseSubtitleProvider:
         down_page_url: str,
         captcha_payload: dict[str, Any] | None,
     ) -> tuple[bytes, str, str]:
+        image_url = self._extract_subhd_captcha_image_url(html, base_url=base_url)
+        if image_url:
+            try:
+                response = self._session.get(
+                    image_url,
+                    timeout=self._timeout,
+                    allow_redirects=True,
+                    headers={
+                        "Referer": down_page_url,
+                        "User-Agent": self._session.headers.get("User-Agent", "MoviePilotSubtitleAgent/0.2"),
+                    },
+                )
+                if response.status_code == 200 and response.content:
+                    return (
+                        response.content,
+                        str(response.headers.get("Content-Type") or "image/png").split(";", 1)[0],
+                        urlparse(image_url).path or "",
+                    )
+            except Exception:
+                pass
+
         image_content, image_content_type, image_path = self._extract_subhd_captcha_svg(captcha_payload)
         if image_content:
             return image_content, image_content_type, image_path
-
-        image_url = self._extract_subhd_captcha_image_url(html, base_url=base_url)
-        if not image_url:
-            return b"", "image/png", ""
-
-        try:
-            response = self._session.get(
-                image_url,
-                timeout=self._timeout,
-                allow_redirects=True,
-                headers={
-                    "Referer": down_page_url,
-                    "User-Agent": self._session.headers.get("User-Agent", "MoviePilotSubtitleAgent/0.2"),
-                },
-            )
-            if response.status_code == 200 and response.content:
-                return (
-                    response.content,
-                    str(response.headers.get("Content-Type") or "image/png").split(";", 1)[0],
-                    urlparse(image_url).path or "",
-                )
-        except Exception:
-            pass
         return b"", "image/png", ""
 
     @staticmethod
@@ -883,6 +881,10 @@ class ChineseSubtitleProvider:
         if not text:
             return b"", "image/png", ""
         if "<svg" not in text.lower() or "</svg>" not in text.lower():
+            return b"", "image/png", ""
+        # Some anti-bot responses embed verbose non-captcha SVG/HTML fragments in msg.
+        # Ignore unusually large payloads and fall back to captcha image URL from down page.
+        if len(text) > 5000:
             return b"", "image/png", ""
         return text.encode("utf-8"), "image/svg+xml", "subhd-captcha.svg"
 
