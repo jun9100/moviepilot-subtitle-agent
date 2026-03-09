@@ -2,6 +2,8 @@
 
 一个面向中文用户的字幕搜索/下载服务（FastAPI），并提供 MoviePilot 兼容接口。
 
+> 当前文档对应版本：`v0.2.23`
+
 ## 项目目标
 
 很多用户在 Plex/Infuse + OpenSubtitles 场景下，仍然会遇到“缺少中文字幕”。本服务的默认策略是：
@@ -81,6 +83,12 @@ environment:
 ```
 
 说明：只有 `HTTP_PROXY` 不够，`https://` 请求需要 `HTTPS_PROXY`。
+
+## 文档脱敏说明
+
+- 本仓库文档中的地址、Token、Cookie、账号密码均使用占位符示例（如 `<proxy-host>`、`<API_TOKEN>`）。
+- 请勿将真实凭据写入 README、Issue、截图或 commit。
+- 建议把真实凭据仅放在 `.env` / 容器环境变量中，并且不要提交到 Git。
 
 ## 检索顺序与精度（可配置）
 
