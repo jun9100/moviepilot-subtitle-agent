@@ -52,6 +52,21 @@ docker compose logs -f subtitle-agent
 docker compose down
 ```
 
+### 本机 OCR 一键部署
+
+本仓库提供了本机联动部署文件（Subtitle Agent + Captcha OCR）：
+
+```bash
+docker compose -f docker-compose.local-ocr.yml up -d --build
+```
+
+验证：
+
+```bash
+curl http://127.0.0.1:8178/health
+curl http://127.0.0.1:8189/health
+```
+
 ## 代理配置（重要）
 
 如果你的 NAS 出网需要代理（例如访问 `assrt.net`），请在容器环境变量里至少配置：
@@ -116,6 +131,29 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 - `COOKIECLOUD_SYNC_INTERVAL_SECONDS`：CookieCloud 自动同步间隔（默认 `1800` 秒）。
 - 兼容旧字段：`SUBHD_COOKIECLOUD_*` 仍可用，但已标记为废弃。
 
+### 7) 验证码 OCR（可配置，默认关闭）
+
+- `ENABLE_CAPTCHA_OCR`：是否启用验证码 OCR 能力（默认 `false`）。
+- `CAPTCHA_OCR_ENDPOINT`：外部 OCR 服务地址（HTTP POST，返回 JSON）。
+- `CAPTCHA_OCR_TIMEOUT_SECONDS`：OCR 请求超时（默认 `8` 秒）。
+- `CAPTCHA_OCR_AUTO_SUBMIT`：是否使用 OCR 结果自动提交验证码（默认 `false`）。
+- `CAPTCHA_OCR_AUTO_MAX_ATTEMPTS`：OCR 自动提交最大尝试次数（默认 `5`，超过后转人工）。
+- `CAPTCHA_OCR_MIN_CONFIDENCE`：OCR 最低置信度阈值（`0.0`~`1.0`，默认 `0.0`）。
+
+OCR 接口约定（建议）：
+
+- 请求：
+  - `image_base64`：验证码图片 base64
+  - `content_type`：图片类型
+  - `provider`：来源（如 `subhd`）
+  - `domain`：站点域名
+- 响应：
+  - `code`（或 `text/captcha`）：识别出的字母数字
+  - `confidence`：置信度（可选）
+
+建议架构：OCR 保持为独立服务，Subtitle Agent 通过 `CAPTCHA_OCR_ENDPOINT` 对接。这样主服务不引入重型 OCR 依赖，便于按需开启/关闭和独立扩缩容。
+有 Intel 核显的 NAS 可把 OCR 服务单独部署为 OpenVINO/PaddleOCR 版本，再把 `CAPTCHA_OCR_ENDPOINT` 指向该服务，以提升识别稳定性。
+
 ## 标准 API
 
 - `POST /api/v1/subtitles/search`
@@ -159,6 +197,8 @@ PROVIDER_STAGE_ORDER=assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,
 
 ## 更新记录（近期）
 
+- `v0.2.23`：整合验证码处理能力：新增可选 OCR 自动识别配置与人工回填链路协同能力；并统一示例配置版本号为 `0.2.23`。
+- `v0.2.22`：新增可选验证码 OCR 集成（外部 `CAPTCHA_OCR_ENDPOINT`），支持返回 OCR 提示并可按置信度阈值自动提交验证码（默认关闭，保持人工回填链路兼容）。
 - `v0.2.21`：补全 MoviePilot 验证码闭环：新增 `GET /api/v1/subtitles/captcha/image/{challenge_id}` 与 `POST /api/v1/subtitles/captcha/solve`；当下载失败由验证码触发时，错误响应会保留 `captcha` 结构化数据（含 `image_path/solve_path`），便于插件稳定接力。
 - `v0.2.20`：强化 `subhd` 验证码稳定性：修复 challenge 刷新链路、优先提取真实验证码图、兼容无图 SVG 回退、验证码大小写变体自动重试，降低“已人工输入但仍失败”的概率。
 - `v0.2.14`：新增 `subhd` 字母验证码挑战链路：服务端缓存验证码任务，开放验证码图片读取与提交接口，供 MoviePilot 插件推送图片并接收用户回填验证码后继续下载。

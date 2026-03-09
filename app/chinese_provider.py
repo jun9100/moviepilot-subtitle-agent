@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import subprocess
@@ -89,6 +90,9 @@ class SubhdCaptchaChallenge:
     candidate: DirectSubtitleCandidate
     query: SearchRequest
     created_at_monotonic: float
+    ocr_code: str = ""
+    ocr_confidence: float = 0.0
+    ocr_source: str = ""
 
 
 class ChineseSubtitleProvider:
@@ -110,6 +114,12 @@ class ChineseSubtitleProvider:
         subhd_captcha_cooldown_seconds: int = 1800,
         subhd_cookie_string: str | None = None,
         subhd_cookie_file: str | None = None,
+        enable_captcha_ocr: bool = False,
+        captcha_ocr_endpoint: str | None = None,
+        captcha_ocr_timeout_seconds: int = 8,
+        captcha_ocr_auto_submit: bool = False,
+        captcha_ocr_auto_max_attempts: int = 5,
+        captcha_ocr_min_confidence: float = 0.0,
         cookiecloud_url: str | None = None,
         cookiecloud_key: str | None = None,
         cookiecloud_password: str | None = None,
@@ -120,6 +130,12 @@ class ChineseSubtitleProvider:
         self._strict_media_type_filter = strict_media_type_filter
         self._subhd_captcha_cooldown_seconds = max(0, int(subhd_captcha_cooldown_seconds or 0))
         self._subhd_domain_cooldown_until: dict[str, float] = {}
+        self._enable_captcha_ocr = bool(enable_captcha_ocr)
+        self._captcha_ocr_endpoint = str(captcha_ocr_endpoint or "").strip()
+        self._captcha_ocr_timeout = max(1, int(captcha_ocr_timeout_seconds or 8))
+        self._captcha_ocr_auto_submit = bool(captcha_ocr_auto_submit)
+        self._captcha_ocr_auto_max_attempts = max(1, int(captcha_ocr_auto_max_attempts or 5))
+        self._captcha_ocr_min_confidence = min(1.0, max(0.0, float(captcha_ocr_min_confidence or 0.0)))
         self._cookiecloud_url = str(cookiecloud_url or "").strip().rstrip("/")
         self._cookiecloud_key = str(cookiecloud_key or "").strip()
         self._cookiecloud_password = str(cookiecloud_password or "").strip()
@@ -415,6 +431,11 @@ class ChineseSubtitleProvider:
                 html=down_html,
                 captcha_payload=payload,
             )
+            auto_downloaded = self._maybe_auto_solve_captcha_challenge(challenge)
+            if auto_downloaded is not None:
+                return auto_downloaded
+            if not challenge.image_content:
+                raise SubtitleDownloadError(f"subhd captcha challenge has no image ({domain})")
             raise SubtitleCaptchaError(
                 f"subhd letter captcha required on {domain}",
                 data=self._captcha_error_data(challenge),
@@ -432,6 +453,11 @@ class ChineseSubtitleProvider:
                     html=down_html,
                     captcha_payload=payload,
                 )
+                auto_downloaded = self._maybe_auto_solve_captcha_challenge(challenge)
+                if auto_downloaded is not None:
+                    return auto_downloaded
+                if not challenge.image_content:
+                    raise SubtitleDownloadError(f"subhd captcha challenge has no image ({domain})")
                 raise SubtitleCaptchaError(message, data=self._captcha_error_data(challenge))
             raise SubtitleDownloadError(message)
 
@@ -719,6 +745,177 @@ class ChineseSubtitleProvider:
             return False
         return True
 
+    def _maybe_auto_solve_captcha_challenge(self, challenge: SubhdCaptchaChallenge) -> DownloadedSubtitle | None:
+        if not (self._enable_captcha_ocr and self._captcha_ocr_auto_submit):
+            return None
+        if not self._captcha_ocr_endpoint:
+            return None
+
+        max_attempts = max(1, self._captcha_ocr_auto_max_attempts)
+        active = challenge
+        last_captcha_data: dict[str, Any] | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            if not active.ocr_code:
+                self._populate_captcha_ocr_hint(active)
+
+            ocr_code = str(active.ocr_code or "").strip()
+            if not ocr_code:
+                if attempt >= max_attempts:
+                    break
+                try:
+                    active = self._refresh_captcha_challenge(active)
+                    continue
+                except Exception as exc:
+                    logger.warning("subhd captcha OCR refresh failed before retry: %s", exc)
+                    break
+
+            try:
+                downloaded, _, _ = self.solve_captcha(active.challenge_id, code=ocr_code)
+                logger.info(
+                    "subhd captcha auto-solved by OCR (domain=%s, sid=%s, attempt=%s/%s, confidence=%.2f)",
+                    active.domain,
+                    active.subtitle_id,
+                    attempt,
+                    max_attempts,
+                    active.ocr_confidence,
+                )
+                return downloaded
+            except SubtitleCaptchaError as exc:
+                last_captcha_data = dict(exc.data) if isinstance(exc.data, dict) else None
+                logger.warning(
+                    "subhd captcha OCR attempt failed (domain=%s, sid=%s, attempt=%s/%s): %s",
+                    active.domain,
+                    active.subtitle_id,
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                if attempt >= max_attempts:
+                    raise SubtitleCaptchaError(
+                        f"subhd requires letter captcha verification after {max_attempts} OCR attempts",
+                        data=last_captcha_data,
+                    ) from exc
+                next_challenge = self._extract_captcha_challenge_from_error_data(last_captcha_data)
+                if next_challenge is not None:
+                    active = next_challenge
+                    continue
+                try:
+                    active = self._refresh_captcha_challenge(active)
+                except Exception as refresh_exc:
+                    logger.warning("subhd captcha OCR refresh after failure failed: %s", refresh_exc)
+                    break
+            except Exception as exc:
+                logger.warning(
+                    "subhd captcha OCR auto-solve unexpected failure (domain=%s, sid=%s, attempt=%s/%s): %s",
+                    active.domain,
+                    active.subtitle_id,
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                if attempt >= max_attempts:
+                    break
+                try:
+                    active = self._refresh_captcha_challenge(active)
+                except Exception as refresh_exc:
+                    logger.warning("subhd captcha OCR refresh after unexpected error failed: %s", refresh_exc)
+                    break
+
+        if last_captcha_data is not None:
+            raise SubtitleCaptchaError(
+                f"subhd requires letter captcha verification after {max_attempts} OCR attempts",
+                data=last_captcha_data,
+            )
+        return None
+
+    def _populate_captcha_ocr_hint(self, challenge: SubhdCaptchaChallenge) -> None:
+        if not self._enable_captcha_ocr:
+            return
+        if not self._captcha_ocr_endpoint:
+            return
+        if not challenge.image_content:
+            return
+        if challenge.ocr_code:
+            return
+
+        ocr_result = self._request_captcha_ocr_hint(challenge)
+        if ocr_result is None:
+            return
+        code, confidence = ocr_result
+        challenge.ocr_code = code
+        challenge.ocr_confidence = confidence
+        challenge.ocr_source = "external"
+
+    def _request_captcha_ocr_hint(self, challenge: SubhdCaptchaChallenge) -> tuple[str, float] | None:
+        image_base64 = base64.b64encode(challenge.image_content).decode("ascii")
+        payload = {
+            "image_base64": image_base64,
+            "content_type": challenge.image_content_type,
+            "provider": challenge.provider,
+            "domain": challenge.domain,
+        }
+        try:
+            response = self._session.post(
+                self._captcha_ocr_endpoint,
+                json=payload,
+                timeout=min(self._timeout, self._captcha_ocr_timeout),
+                headers={"Accept": "application/json"},
+            )
+        except Exception as exc:
+            logger.warning("captcha OCR request failed: %s", exc)
+            return None
+
+        if response.status_code != 200:
+            logger.warning("captcha OCR service returned status %s", response.status_code)
+            return None
+
+        try:
+            body = response.json()
+        except Exception as exc:
+            logger.warning("captcha OCR service returned invalid json: %s", exc)
+            return None
+        if not isinstance(body, dict):
+            return None
+
+        raw_code = body.get("code") or body.get("text") or body.get("captcha")
+        normalized_code = self._normalize_ocr_code(raw_code)
+        if not normalized_code:
+            return None
+
+        try:
+            confidence = float(body.get("confidence", 0.0) or 0.0)
+        except Exception:
+            confidence = 0.0
+        confidence = min(1.0, max(0.0, confidence))
+        if confidence < self._captcha_ocr_min_confidence:
+            return None
+        return normalized_code, confidence
+
+    @staticmethod
+    def _normalize_ocr_code(value: Any) -> str:
+        text = re.sub(r"[^A-Za-z0-9]", "", str(value or "").strip())
+        if len(text) < 3:
+            return ""
+        return text[:12]
+
+    def _extract_captcha_challenge_from_error_data(
+        self,
+        error_data: dict[str, Any] | None,
+    ) -> SubhdCaptchaChallenge | None:
+        if not isinstance(error_data, dict):
+            return None
+        captcha_data = error_data.get("captcha")
+        if not isinstance(captcha_data, dict):
+            return None
+        challenge_id = str(captcha_data.get("challenge_id") or "").strip()
+        if not challenge_id:
+            return None
+        try:
+            return self._get_captcha_challenge(challenge_id)
+        except Exception:
+            return None
+
     def _create_captcha_challenge(
         self,
         *,
@@ -754,6 +951,7 @@ class ChineseSubtitleProvider:
             query=query,
             created_at_monotonic=time.monotonic(),
         )
+        self._populate_captcha_ocr_hint(challenge)
         with self._captcha_lock:
             self._captcha_challenges[challenge.challenge_id] = challenge
         return challenge
@@ -846,6 +1044,13 @@ class ChineseSubtitleProvider:
     def _captcha_error_data(self, challenge: SubhdCaptchaChallenge) -> dict[str, Any]:
         image_available = bool(challenge.image_content)
         image_path = f"/api/v1/subtitles/captcha/image/{challenge.challenge_id}" if image_available else ""
+        ocr_hint: dict[str, Any] | None = None
+        if challenge.ocr_code:
+            ocr_hint = {
+                "code": challenge.ocr_code,
+                "confidence": challenge.ocr_confidence,
+                "source": challenge.ocr_source or "external",
+            }
         return {
             "captcha": {
                 "challenge_id": challenge.challenge_id,
@@ -855,6 +1060,7 @@ class ChineseSubtitleProvider:
                 "detail_url": challenge.detail_url,
                 "image_path": image_path,
                 "image_available": image_available,
+                "ocr_hint": ocr_hint,
             }
         }
 

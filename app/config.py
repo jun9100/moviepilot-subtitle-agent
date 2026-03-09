@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MoviePilot Subtitle Agent"
-    app_version: str = "0.2.21"
+    app_version: str = "0.2.23"
     host: str = "0.0.0.0"
     port: int = 8178
     debug: bool = False
@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     subhd_captcha_cooldown_seconds: int = 1800
     subhd_cookie_string: str | None = None
     subhd_cookie_file: str | None = None
+    enable_captcha_ocr: bool = False
+    captcha_ocr_endpoint: str | None = None
+    captcha_ocr_timeout_seconds: int = 8
+    captcha_ocr_auto_submit: bool = False
+    captcha_ocr_auto_max_attempts: int = 5
+    captcha_ocr_min_confidence: float = 0.0
     cookiecloud_url: str | None = None
     cookiecloud_key: str | None = None
     cookiecloud_password: str | None = None
@@ -135,6 +141,39 @@ class Settings(BaseSettings):
             return 1800
         return max(0, parsed)
 
+    @field_validator("captcha_ocr_timeout_seconds", mode="before")
+    @classmethod
+    def normalize_captcha_ocr_timeout_seconds(cls, value: Any) -> int:
+        if value is None:
+            return 8
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 8
+        return max(1, parsed)
+
+    @field_validator("captcha_ocr_auto_max_attempts", mode="before")
+    @classmethod
+    def normalize_captcha_ocr_auto_max_attempts(cls, value: Any) -> int:
+        if value is None:
+            return 5
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 5
+        return max(1, parsed)
+
+    @field_validator("captcha_ocr_min_confidence", mode="before")
+    @classmethod
+    def normalize_captcha_ocr_min_confidence(cls, value: Any) -> float:
+        if value is None:
+            return 0.0
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return min(1.0, max(0.0, parsed))
+
     @field_validator("cookiecloud_sync_interval_seconds", "subhd_cookiecloud_sync_interval_seconds", mode="before")
     @classmethod
     def normalize_cookiecloud_sync_interval_seconds(cls, value: Any) -> int | None:
@@ -149,6 +188,10 @@ class Settings(BaseSettings):
     @property
     def effective_cookiecloud_url(self) -> str | None:
         return self.cookiecloud_url or self.subhd_cookiecloud_url
+
+    @property
+    def effective_captcha_ocr_endpoint(self) -> str:
+        return str(self.captcha_ocr_endpoint or "").strip()
 
     @property
     def effective_cookiecloud_key(self) -> str | None:

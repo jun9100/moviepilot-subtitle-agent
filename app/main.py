@@ -92,6 +92,11 @@ def create_app(
             "enable_content_language_validation": settings_state.enable_content_language_validation,
             "chinese_confidence_threshold": settings_state.chinese_confidence_threshold,
             "chinese_confidence_min_chars": settings_state.chinese_confidence_min_chars,
+            "enable_captcha_ocr": settings_state.enable_captcha_ocr,
+            "captcha_ocr_endpoint_configured": bool(settings_state.effective_captcha_ocr_endpoint),
+            "captcha_ocr_auto_submit": settings_state.captcha_ocr_auto_submit,
+            "captcha_ocr_auto_max_attempts": settings_state.captcha_ocr_auto_max_attempts,
+            "captcha_ocr_min_confidence": settings_state.captcha_ocr_min_confidence,
             "cookiecloud_enabled": bool(
                 (settings_state.effective_cookiecloud_url or "").strip()
                 and (settings_state.effective_cookiecloud_key or "").strip()

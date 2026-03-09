@@ -47,3 +47,24 @@ def test_cookiecloud_new_names_override_legacy_names():
     assert settings.effective_cookiecloud_key == "new_key"
     assert settings.effective_cookiecloud_password == "new_pwd"
     assert settings.effective_cookiecloud_sync_interval_seconds == 300
+
+
+def test_captcha_ocr_settings_normalization():
+    settings = Settings(
+        enable_captcha_ocr=True,
+        captcha_ocr_endpoint="  http://ocr.local/solve  ",
+        captcha_ocr_timeout_seconds="3",
+        captcha_ocr_auto_max_attempts="5",
+        captcha_ocr_min_confidence="0.75",
+    )
+
+    assert settings.enable_captcha_ocr is True
+    assert settings.effective_captcha_ocr_endpoint == "http://ocr.local/solve"
+    assert settings.captcha_ocr_timeout_seconds == 3
+    assert settings.captcha_ocr_auto_max_attempts == 5
+    assert settings.captcha_ocr_min_confidence == 0.75
+
+
+def test_captcha_ocr_auto_max_attempts_default_is_five():
+    settings = Settings()
+    assert settings.captcha_ocr_auto_max_attempts == 5

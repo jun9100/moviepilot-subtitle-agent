@@ -1,12 +1,12 @@
 services:
   subtitle-agent:
-    image: jun9100/moviepilot-subtitle-agent:v0.2.21
+    image: jun9100/moviepilot-subtitle-agent:v0.2.23
     container_name: moviepilot-subtitle-agent
     ports:
       - "8178:8178"
     environment:
       APP_NAME: "MoviePilot Subtitle Agent"
-      APP_VERSION: "0.2.21"
+      APP_VERSION: "0.2.23"
       HOST: "0.0.0.0"
       PORT: "8178"
       DEBUG: "false"
@@ -35,6 +35,12 @@ services:
       SUBHD_CAPTCHA_COOLDOWN_SECONDS: "1800"
       SUBHD_COOKIE_STRING: ""
       SUBHD_COOKIE_FILE: ""
+      ENABLE_CAPTCHA_OCR: "false"
+      CAPTCHA_OCR_ENDPOINT: ""
+      CAPTCHA_OCR_TIMEOUT_SECONDS: "8"
+      CAPTCHA_OCR_AUTO_SUBMIT: "false"
+      CAPTCHA_OCR_AUTO_MAX_ATTEMPTS: "5"
+      CAPTCHA_OCR_MIN_CONFIDENCE: "0.0"
       COOKIECLOUD_URL: ""
       COOKIECLOUD_KEY: ""
       COOKIECLOUD_PASSWORD: ""
@@ -44,8 +50,8 @@ services:
       HTTPS_PROXY: "http://<proxy-host>:999"
       http_proxy: "http://<proxy-host>:999"
       https_proxy: "http://<proxy-host>:999"
-      NO_PROXY: "127.0.0.1,localhost,<subtitle-agent-host>,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
-      no_proxy: "127.0.0.1,localhost,<subtitle-agent-host>,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
+      NO_PROXY: "127.0.0.1,localhost,<subtitle-agent-host>,subhd.tv,subhdtw.com,subhd.cc,subhd.me,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
+      no_proxy: "127.0.0.1,localhost,<subtitle-agent-host>,subhd.tv,subhdtw.com,subhd.cc,subhd.me,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
 
       # Optional provider credentials
       ADDIC7ED_USERNAME: ""

@@ -223,6 +223,57 @@ def test_download_subhd_captcha_required(monkeypatch):
     assert captcha["image_available"] is True
 
 
+def test_subhd_captcha_error_contains_ocr_hint(monkeypatch):
+    provider = ChineseSubtitleProvider(
+        timeout_seconds=5,
+        enable_captcha_ocr=True,
+        captcha_ocr_endpoint="http://ocr.local/solve",
+    )
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="aCQ07t",
+        title="短剧开始啦",
+        release_name="Life's Punchline.S01.WEB-DL.KKTV",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/aCQ07t",
+        page_link="https://subhd.tv/a/aCQ07t",
+        language_tags=["zh-cn", "zh-tw"],
+        matches=[],
+        score=0,
+    )
+
+    monkeypatch.setattr(provider, "_request_captcha_ocr_hint", lambda challenge: ("AbCd", 0.91))
+
+    captcha_svg = "<svg xmlns='http://www.w3.org/2000/svg' width='120' height='40'><text x='10' y='28'>AbCd</text></svg>"
+
+    def fake_get(url, *args, **kwargs):
+        if url == "https://subhd.tv/a/aCQ07t":
+            return _FakeResponse(status_code=200, text="<html></html>")
+        if url == "https://subhd.tv/down/aCQ07t":
+            return _FakeResponse(status_code=200, text="<html><div id='svgBox'></div></html>")
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(provider._session, "get", fake_get)
+    monkeypatch.setattr(
+        provider._session,
+        "post",
+        lambda *args, **kwargs: _FakeResponse(
+            status_code=200,
+            json_data={"success": False, "pass": False, "msg": captcha_svg},
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        ),
+    )
+
+    with pytest.raises(SubtitleCaptchaError) as exc:
+        provider.download(candidate, query=_query())
+
+    captcha = exc.value.data["captcha"]
+    assert captcha["ocr_hint"]["code"] == "AbCd"
+    assert captcha["ocr_hint"]["confidence"] == 0.91
+    assert captcha["ocr_hint"]["source"] == "external"
+
+
 def test_download_subhd_down_page_script_does_not_false_positive(monkeypatch):
     provider = _provider()
     candidate = DirectSubtitleCandidate(
@@ -334,6 +385,227 @@ def test_solve_subhd_captcha_uses_api_sub_down(monkeypatch):
     assert downloaded.content == subtitle_content
     assert solved_candidate.subtitle_id == "Ks2qd5"
     assert solved_query.title == "国宝"
+
+
+def test_download_subhd_auto_submit_captcha_with_ocr(monkeypatch):
+    provider = ChineseSubtitleProvider(
+        timeout_seconds=5,
+        enable_captcha_ocr=True,
+        captcha_ocr_endpoint="http://ocr.local/solve",
+        captcha_ocr_auto_submit=True,
+    )
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="Ks2qd5",
+        title="国宝",
+        release_name="Kokuho.2025.1080p.WEBRip.x264.AAC.2.0-CabPro",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/Ks2qd5",
+        page_link="https://subhd.tv/a/Ks2qd5",
+        language_tags=["zh-cn"],
+        matches=[],
+        score=0,
+    )
+    subtitle_content = b"1\n00:00:00,000 --> 00:00:01,000\n\xe4\xbd\xa0\xe5\xa5\xbd\n"
+
+    monkeypatch.setattr(provider, "_request_captcha_ocr_hint", lambda challenge: ("AbCd", 0.96))
+    monkeypatch.setattr(provider, "_subhd_domain_order", lambda c: ["subhd.tv"])
+
+    def fake_get(url, *args, **kwargs):
+        if url in {"https://subhd.tv/a/Ks2qd5", "https://subhd.tv/down/Ks2qd5"}:
+            return _FakeResponse(status_code=200, text="<html><div id='svgBox'></div></html>")
+        if url == "https://dl.subhd.tv/demo.srt":
+            return _FakeResponse(
+                status_code=200,
+                content=subtitle_content,
+                headers={"Content-Disposition": "attachment; filename=\"demo.srt\""},
+            )
+        raise AssertionError(f"unexpected url: {url}")
+
+    def fake_post(url, *args, **kwargs):
+        assert url == "https://subhd.tv/api/sub/down"
+        body = kwargs.get("json") or {}
+        if body.get("cap") == "":
+            return _FakeResponse(
+                status_code=200,
+                json_data={"success": False, "pass": False, "msg": "<svg xmlns='http://www.w3.org/2000/svg'></svg>"},
+                headers={"Content-Type": "application/json; charset=utf-8"},
+            )
+        if body.get("cap") == "AbCd":
+            return _FakeResponse(
+                status_code=200,
+                json_data={"success": True, "pass": True, "url": "https://dl.subhd.tv/demo.srt"},
+                headers={"Content-Type": "application/json; charset=utf-8"},
+            )
+        raise AssertionError(f"unexpected cap code: {body.get('cap')}")
+
+    monkeypatch.setattr(provider._session, "get", fake_get)
+    monkeypatch.setattr(provider._session, "post", fake_post)
+
+    downloaded = provider.download(candidate, query=_query().model_copy(update={"title": "国宝", "media_type": "movie"}))
+    assert downloaded.content == subtitle_content
+    assert downloaded.subtitle_format == "srt"
+
+
+def test_subhd_auto_submit_ocr_retries_three_times_before_manual(monkeypatch):
+    provider = ChineseSubtitleProvider(
+        timeout_seconds=5,
+        enable_captcha_ocr=True,
+        captcha_ocr_endpoint="http://ocr.local/solve",
+        captcha_ocr_auto_submit=True,
+        captcha_ocr_auto_max_attempts=3,
+    )
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="Ks2qd5",
+        title="国宝",
+        release_name="Kokuho.2025.1080p.WEBRip.x264.AAC.2.0-CabPro",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/Ks2qd5",
+        page_link="https://subhd.tv/a/Ks2qd5",
+        language_tags=["zh-cn"],
+        matches=[],
+        score=0,
+    )
+
+    challenge = provider._create_captcha_challenge(
+        domain="subhd.tv",
+        sid="Ks2qd5",
+        candidate=candidate,
+        query=_query().model_copy(update={"title": "国宝", "media_type": "movie"}),
+        detail_url="https://subhd.tv/a/Ks2qd5",
+        down_page_url="https://subhd.tv/down/Ks2qd5",
+        html="<html></html>",
+        captcha_payload={"msg": "<svg xmlns='http://www.w3.org/2000/svg'></svg>"},
+    )
+    challenge.ocr_code = "AbCd"
+
+    attempts: list[tuple[str, str]] = []
+
+    def fake_solve_captcha(challenge_id: str, *, code: str):
+        attempts.append((challenge_id, code))
+        raise SubtitleCaptchaError(
+            "captcha mismatch",
+            data={"captcha": {"challenge_id": challenge_id}},
+        )
+
+    monkeypatch.setattr(provider, "solve_captcha", fake_solve_captcha)
+
+    with pytest.raises(SubtitleCaptchaError):
+        provider._maybe_auto_solve_captcha_challenge(challenge)
+
+    assert len(attempts) == 3
+
+
+def test_subhd_auto_submit_ocr_default_retries_five_times_before_manual(monkeypatch):
+    provider = ChineseSubtitleProvider(
+        timeout_seconds=5,
+        enable_captcha_ocr=True,
+        captcha_ocr_endpoint="http://ocr.local/solve",
+        captcha_ocr_auto_submit=True,
+    )
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="Ks2qd5",
+        title="国宝",
+        release_name="Kokuho.2025.1080p.WEBRip.x264.AAC.2.0-CabPro",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/Ks2qd5",
+        page_link="https://subhd.tv/a/Ks2qd5",
+        language_tags=["zh-cn"],
+        matches=[],
+        score=0,
+    )
+    challenge = provider._create_captcha_challenge(
+        domain="subhd.tv",
+        sid="Ks2qd5",
+        candidate=candidate,
+        query=_query().model_copy(update={"title": "国宝", "media_type": "movie"}),
+        detail_url="https://subhd.tv/a/Ks2qd5",
+        down_page_url="https://subhd.tv/down/Ks2qd5",
+        html="<html></html>",
+        captcha_payload={"msg": "<svg xmlns='http://www.w3.org/2000/svg'></svg>"},
+    )
+    challenge.ocr_code = "AbCd"
+
+    attempts: list[tuple[str, str]] = []
+
+    def fake_solve_captcha(challenge_id: str, *, code: str):
+        attempts.append((challenge_id, code))
+        raise SubtitleCaptchaError(
+            "captcha mismatch",
+            data={"captcha": {"challenge_id": challenge_id}},
+        )
+
+    monkeypatch.setattr(provider, "solve_captcha", fake_solve_captcha)
+
+    with pytest.raises(SubtitleCaptchaError) as exc:
+        provider._maybe_auto_solve_captcha_challenge(challenge)
+
+    assert len(attempts) == 5
+    assert "after 5 OCR attempts" in str(exc.value)
+
+
+def test_subhd_auto_submit_ocr_succeeds_on_third_attempt(monkeypatch):
+    provider = ChineseSubtitleProvider(
+        timeout_seconds=5,
+        enable_captcha_ocr=True,
+        captcha_ocr_endpoint="http://ocr.local/solve",
+        captcha_ocr_auto_submit=True,
+        captcha_ocr_auto_max_attempts=3,
+    )
+    candidate = DirectSubtitleCandidate(
+        provider="subhd",
+        subtitle_id="Ks2qd5",
+        title="国宝",
+        release_name="Kokuho.2025.1080p.WEBRip.x264.AAC.2.0-CabPro",
+        language="zh",
+        subtitle_format="srt",
+        download_url="https://subhd.tv/down/Ks2qd5",
+        page_link="https://subhd.tv/a/Ks2qd5",
+        language_tags=["zh-cn"],
+        matches=[],
+        score=0,
+    )
+    query = _query().model_copy(update={"title": "国宝", "media_type": "movie"})
+    challenge = provider._create_captcha_challenge(
+        domain="subhd.tv",
+        sid="Ks2qd5",
+        candidate=candidate,
+        query=query,
+        detail_url="https://subhd.tv/a/Ks2qd5",
+        down_page_url="https://subhd.tv/down/Ks2qd5",
+        html="<html></html>",
+        captcha_payload={"msg": "<svg xmlns='http://www.w3.org/2000/svg'></svg>"},
+    )
+    challenge.ocr_code = "AbCd"
+
+    attempts = {"n": 0}
+    expected = DownloadedSubtitle(
+        content=b"1\n00:00:00,000 --> 00:00:01,000\n\xe4\xbd\xa0\xe5\xa5\xbd\n",
+        subtitle_format="srt",
+        language="zh",
+        filename="demo.srt",
+    )
+
+    def fake_solve_captcha(challenge_id: str, *, code: str):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise SubtitleCaptchaError(
+                "captcha mismatch",
+                data={"captcha": {"challenge_id": challenge_id}},
+            )
+        return expected, candidate, query
+
+    monkeypatch.setattr(provider, "solve_captcha", fake_solve_captcha)
+
+    downloaded = provider._maybe_auto_solve_captcha_challenge(challenge)
+    assert downloaded is not None
+    assert downloaded.content == expected.content
+    assert attempts["n"] == 3
 
 
 def test_download_subhdtw_retries_mirrors(monkeypatch):
