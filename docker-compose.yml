@@ -1,16 +1,20 @@
 services:
   subtitle-agent:
+    # 镜像版本：建议固定到具体版本，避免 latest 带来不可预期变更
     image: jun9100/moviepilot-subtitle-agent:v0.2.23
     container_name: moviepilot-subtitle-agent
     ports:
+      # 左侧为宿主机端口，右侧为容器端口
       - "8178:8178"
     environment:
+      # 基础服务配置
       APP_NAME: "MoviePilot Subtitle Agent"
       APP_VERSION: "0.2.23"
       HOST: "0.0.0.0"
       PORT: "8178"
       DEBUG: "false"
 
+      # 字幕检索策略（建议默认即可）
       DEFAULT_LANGUAGES: "zh-cn,zh-tw"
       DEFAULT_PROVIDERS: "assrt,subhd,subhdtw"
       PROVIDER_STAGE_ORDER: "assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,opensubtitles"
@@ -35,17 +39,22 @@ services:
       SUBHD_CAPTCHA_COOLDOWN_SECONDS: "1800"
       SUBHD_COOKIE_STRING: ""
       SUBHD_COOKIE_FILE: ""
+
+      # 验证码 OCR（默认关闭，人工回填更稳定）
       ENABLE_CAPTCHA_OCR: "false"
       CAPTCHA_OCR_ENDPOINT: ""
       CAPTCHA_OCR_TIMEOUT_SECONDS: "8"
       CAPTCHA_OCR_AUTO_SUBMIT: "false"
       CAPTCHA_OCR_AUTO_MAX_ATTEMPTS: "5"
       CAPTCHA_OCR_MIN_CONFIDENCE: "0.0"
+
+      # CookieCloud（可选；用于同步浏览器 Cookie）
       COOKIECLOUD_URL: ""
       COOKIECLOUD_KEY: ""
       COOKIECLOUD_PASSWORD: ""
       COOKIECLOUD_SYNC_INTERVAL_SECONDS: "1800"
 
+      # 代理配置（如无需代理可删除这 6 行）
       HTTP_PROXY: "http://<proxy-host>:999"
       HTTPS_PROXY: "http://<proxy-host>:999"
       http_proxy: "http://<proxy-host>:999"
@@ -53,7 +62,7 @@ services:
       NO_PROXY: "127.0.0.1,localhost,<subtitle-agent-host>,subhd.tv,subhdtw.com,subhd.cc,subhd.me,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
       no_proxy: "127.0.0.1,localhost,<subtitle-agent-host>,subhd.tv,subhdtw.com,subhd.cc,subhd.me,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
 
-      # Optional provider credentials
+      # 可选站点账号（仅在你确实有账号时填写）
       ADDIC7ED_USERNAME: ""
       ADDIC7ED_PASSWORD: ""
       OPENSUBTITLES_USERNAME: ""
@@ -62,5 +71,7 @@ services:
       OPENSUBTITLESCOM_PASSWORD: ""
       OPENSUBTITLESCOM_API_KEY: ""
     volumes:
+      # 字幕缓存、Cookie、统计数据持久化目录
       - ./data:/app/data
+    # Docker 重启策略：除非手动停止，否则随系统拉起
     restart: unless-stopped
