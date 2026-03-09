@@ -205,7 +205,7 @@ OCR 接口约定（建议）：
 
 ## 更新记录（近期）
 
-- `v0.2.23`：整合验证码处理能力：新增可选 OCR 自动识别配置与人工回填链路协同能力；并统一示例配置版本号为 `0.2.23`。
+- `v0.2.23`：整合验证码处理能力：新增可选 OCR 自动识别配置与人工回填链路协同能力；并补充脱敏的 `docker-compose.local-ocr.yml` 模板。
 - `v0.2.22`：新增可选验证码 OCR 集成（外部 `CAPTCHA_OCR_ENDPOINT`），支持返回 OCR 提示并可按置信度阈值自动提交验证码（默认关闭，保持人工回填链路兼容）。
 - `v0.2.21`：补全 MoviePilot 验证码闭环：新增 `GET /api/v1/subtitles/captcha/image/{challenge_id}` 与 `POST /api/v1/subtitles/captcha/solve`；当下载失败由验证码触发时，错误响应会保留 `captcha` 结构化数据（含 `image_path/solve_path`），便于插件稳定接力。
 - `v0.2.20`：强化 `subhd` 验证码稳定性：修复 challenge 刷新链路、优先提取真实验证码图、兼容无图 SVG 回退、验证码大小写变体自动重试，降低“已人工输入但仍失败”的概率。

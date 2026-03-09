@@ -19,6 +19,7 @@ htmlcov/
 
 # Local runtime output
 data/subtitles/
+data/provider_priority_stats.json
 *.log
 
 # OS/editor noise

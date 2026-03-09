@@ -1,0 +1,92 @@
+services:
+  captcha-ocr:
+    # 本地 OCR 服务（可选）
+    build:
+      context: ./services/captcha-ocr
+    container_name: moviepilot-captcha-ocr
+    ports:
+      - "8189:8189"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8189/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  subtitle-agent:
+    # 版本固定，避免 latest 漂移
+    image: jun9100/moviepilot-subtitle-agent:v0.2.23
+    container_name: moviepilot-subtitle-agent
+    depends_on:
+      captcha-ocr:
+        condition: service_healthy
+    ports:
+      - "8178:8178"
+    environment:
+      # 基础配置
+      APP_NAME: "MoviePilot Subtitle Agent"
+      APP_VERSION: "0.2.23"
+      HOST: "0.0.0.0"
+      PORT: "8178"
+      DEBUG: "false"
+
+      # 检索策略
+      DEFAULT_LANGUAGES: "zh-cn,zh-tw"
+      DEFAULT_PROVIDERS: "assrt,subhd,subhdtw"
+      PROVIDER_STAGE_ORDER: "assrt,subhd,subhdtw|podnapisi,tvsubtitles|opensubtitlescom,opensubtitles"
+      ENABLE_SUBLIMINAL_FALLBACK: "true"
+      SUBLIMINAL_FALLBACK_PROVIDERS: "podnapisi,tvsubtitles,opensubtitlescom,opensubtitles"
+      MAX_RESULTS: "30"
+      MIN_SCORE: "0"
+      ENABLE_PARALLEL_SEARCH: "true"
+      SEARCH_WORKERS: "6"
+      ENABLE_ADAPTIVE_PROVIDER_PRIORITY: "true"
+      PROVIDER_PRIORITY_STATS_FILE: "data/provider_priority_stats.json"
+      PROVIDER_PRIORITY_PERSIST_INTERVAL_SECONDS: "30"
+      TOKEN_TTL_SECONDS: "1800"
+      REQUEST_TIMEOUT_SECONDS: "20"
+      SUBTITLE_OUTPUT_DIR: "data/subtitles"
+      USER_AGENT: "MoviePilotSubtitleAgent/0.2"
+      ALLOW_SEASON_PACK_FOR_EPISODE: "true"
+      STRICT_MEDIA_TYPE_FILTER: "true"
+      ENABLE_CONTENT_LANGUAGE_VALIDATION: "true"
+      CHINESE_CONFIDENCE_THRESHOLD: "0.25"
+      CHINESE_CONFIDENCE_MIN_CHARS: "4"
+      SUBHD_CAPTCHA_COOLDOWN_SECONDS: "1800"
+      SUBHD_COOKIE_STRING: ""
+      SUBHD_COOKIE_FILE: ""
+
+      # OCR 自动回填（默认开启；若要纯人工改为 false）
+      ENABLE_CAPTCHA_OCR: "true"
+      CAPTCHA_OCR_ENDPOINT: "http://captcha-ocr:8189/ocr"
+      CAPTCHA_OCR_TIMEOUT_SECONDS: "8"
+      CAPTCHA_OCR_AUTO_SUBMIT: "true"
+      CAPTCHA_OCR_AUTO_MAX_ATTEMPTS: "5"
+      CAPTCHA_OCR_MIN_CONFIDENCE: "0.0"
+
+      # CookieCloud（可选）
+      COOKIECLOUD_URL: ""
+      COOKIECLOUD_KEY: ""
+      COOKIECLOUD_PASSWORD: ""
+      COOKIECLOUD_SYNC_INTERVAL_SECONDS: "1800"
+
+      # 代理配置（如无需代理可删除这 6 行）
+      HTTP_PROXY: "http://<proxy-host>:999"
+      HTTPS_PROXY: "http://<proxy-host>:999"
+      http_proxy: "http://<proxy-host>:999"
+      https_proxy: "http://<proxy-host>:999"
+      NO_PROXY: "127.0.0.1,localhost,subtitle-agent,captcha-ocr,subhd.tv,subhdtw.com,subhd.cc,subhd.me,<subtitle-agent-host>,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
+      no_proxy: "127.0.0.1,localhost,subtitle-agent,captcha-ocr,subhd.tv,subhdtw.com,subhd.cc,subhd.me,<subtitle-agent-host>,<proxy-host>,172.16.0.0/12,10.0.0.0/8"
+
+      # 可选站点账号
+      ADDIC7ED_USERNAME: ""
+      ADDIC7ED_PASSWORD: ""
+      OPENSUBTITLES_USERNAME: ""
+      OPENSUBTITLES_PASSWORD: ""
+      OPENSUBTITLESCOM_USERNAME: ""
+      OPENSUBTITLESCOM_PASSWORD: ""
+      OPENSUBTITLESCOM_API_KEY: ""
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
