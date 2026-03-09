@@ -1,8 +1,7 @@
 services:
   captcha-ocr:
-    # 本地 OCR 服务（可选）
-    build:
-      context: ./services/captcha-ocr
+    # OCR 服务（直接拉取 Docker Hub 镜像，无需本地源码）
+    image: jun9100/moviepilot-captcha-ocr:v0.1.0
     container_name: moviepilot-captcha-ocr
     ports:
       - "8189:8189"

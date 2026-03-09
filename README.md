@@ -43,6 +43,7 @@ curl http://127.0.0.1:8178/health
 
 ```bash
 cp .env.example .env
+# .env 与 docker-compose.yml 放在同一目录（仓库根目录）
 docker compose up --build -d
 curl http://127.0.0.1:8178/health
 docker compose logs -f subtitle-agent
@@ -59,7 +60,10 @@ docker compose down
 本仓库提供了本机联动部署文件（Subtitle Agent + Captcha OCR）：
 
 ```bash
-docker compose -f docker-compose.local-ocr.yml up -d --build
+cp .env.example .env
+# .env 与 docker-compose.local-ocr.yml 放在同一目录（仓库根目录）
+docker compose -f docker-compose.local-ocr.yml pull
+docker compose -f docker-compose.local-ocr.yml up -d
 ```
 
 验证：
